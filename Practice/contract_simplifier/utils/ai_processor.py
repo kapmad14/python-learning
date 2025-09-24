@@ -5,7 +5,7 @@ import openai
 import streamlit as st
 
 # Try Streamlit secrets first, then environment variable for local testing
-openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+openai.api_key = st.secrets.get("OPENAI_API_KEY")
 
 if not openai.api_key:
     st.error("⚠️ OpenAI API key not set. Please set it in Streamlit Secrets or environment variable.")
