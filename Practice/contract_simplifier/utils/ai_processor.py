@@ -4,16 +4,12 @@ import os
 import openai
 import streamlit as st
 
-# Try Streamlit secrets first, then environment variable for local testing
-<<<<<<< Updated upstream
-openai.api_key = st.secrets.get("OPENAI_API_KEY")
-=======
-openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
->>>>>>> Stashed changes
-
-if not openai.api_key:
-    st.error("⚠️ OpenAI API key not set. Please set it in Streamlit Secrets or environment variable.")
-
+try:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
+except KeyError:
+    st.error("OpenAI API key not found. Add it in Streamlit Secrets under Settings → Secrets.")
+    openai.api_key = None
+    
 
 def summarize_contract(text, model="gpt-3.5-turbo", max_tokens=1000):
     """
