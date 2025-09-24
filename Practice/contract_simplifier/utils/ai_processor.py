@@ -2,15 +2,13 @@
 # OpenAI summarization wrapper (uses OpenAI Python >=1.0.0 interface)
 import os
 import openai
+import streamlit as st
 
-# --- CONFIG ---
-# For local testing you can hard-code your key here.
-# For production use environment variables or Streamlit secrets.
-OPENAI_API_KEY_HARDCODE = "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"
-# Example: OPENAI_API_KEY_HARDCODE = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# Try Streamlit secrets first, then environment variable for local testing
+openai.api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 
-# Prefer environment variable, fallback to hard-coded (if provided)
-openai.api_key = os.getenv("OPENAI_API_KEY") or OPENAI_API_KEY_HARDCODE
+if not openai.api_key:
+    st.error("⚠️ OpenAI API key not set. Please set it in Streamlit Secrets or environment variable.")
 
 
 def summarize_contract(text, model="gpt-3.5-turbo", max_tokens=1000):
