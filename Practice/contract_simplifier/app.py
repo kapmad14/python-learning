@@ -49,7 +49,7 @@ if menu == "Login / Register":
             st.session_state.logged_in = True
             st.session_state.user = username
             st.success(f"Logged in as {username}")
-            st.experimental_rerun()  # reload to show main app
+            st.rerun()  # reload to show main app
         else:
             st.error("Invalid credentials")
 
