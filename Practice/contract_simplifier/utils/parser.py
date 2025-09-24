@@ -1,79 +1,57 @@
-# utils/parser.py
-# Text extraction + OCR helpers
-import io
-import pdfplumber
+import requests
+from io import BytesIO
 from docx import Document
-import pytesseract
-from pdf2image import convert_from_bytes
-from PIL import Image
+import pdfplumber
+import streamlit as st
 
-
-def _read_bytes(file):
-    """
-    Accepts either a file path (str) or a file-like object (Streamlit upload).
-    Returns bytes.
-    """
-    if isinstance(file, str):
-        with open(file, "rb") as f:
-            return f.read()
-    else:
-        # Streamlit's uploaded file supports .read()
-        file_bytes = file.read()
-        # If the caller wants to reuse the file later, they may need to reset the pointer.
-        try:
-            file.seek(0)
-        except Exception:
-            pass
-        return file_bytes
-
-
+# ----------------------
+# PDF / DOCX extraction
+# ----------------------
 def extract_text_from_pdf(file):
-    """
-    Extract text from a PDF (if text is selectable).
-    `file` can be a path (str) or a file-like object (streamlit upload).
-    """
-    b = _read_bytes(file)
-    text = ""
-    try:
-        with pdfplumber.open(io.BytesIO(b)) as pdf:
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-    except Exception as e:
-        # Reraise so caller can decide whether to fallback to OCR
-        raise e
-    return text
-
+    with pdfplumber.open(file) as pdf:
+        pages = [page.extract_text() for page in pdf.pages]
+    return "\n".join(filter(None, pages))
 
 def extract_text_from_docx(file):
-    """
-    Extract text from a DOCX file. file can be path or file-like object.
-    """
-    b = _read_bytes(file)
-    doc = Document(io.BytesIO(b))
-    paragraphs = [p.text for p in doc.paragraphs if p.text]
-    return "\n".join(paragraphs)
+    doc = Document(file)
+    return "\n".join([p.text for p in doc.paragraphs])
 
+# ----------------------
+# Cloud OCR extraction
+# ----------------------
+OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY", "")  # Add your key in Streamlit Secrets
 
-def extract_text_from_scanned_pdf(file):
-    """
-    OCR the pages of a scanned PDF (or image-only PDF).
-    Returns the concatenated text.
-    """
-    b = _read_bytes(file)
-    images = convert_from_bytes(b)  # returns list of PIL.Image
-    full_text = ""
-    for img in images:
-        txt = pytesseract.image_to_string(img)
-        full_text += txt + "\n"
-    return full_text
-
+def ocr_space_file(file):
+    """Send file to OCR.Space API and return recognized text"""
+    if not OCR_SPACE_API_KEY:
+        st.error("OCR API key not found in secrets")
+        return ""
+    url = "https://api.ocr.space/parse/image"
+    payload = {"apikey": OCR_SPACE_API_KEY, "language": "eng"}
+    files = {"file": file.getvalue()}  # BytesIO object
+    response = requests.post(url, files=files, data=payload)
+    result = response.json()
+    if result["IsErroredOnProcessing"]:
+        st.error(result.get("ErrorMessage", "OCR failed"))
+        return ""
+    parsed_text = ""
+    for item in result["ParsedResults"]:
+        parsed_text += item["ParsedText"] + "\n"
+    return parsed_text
 
 def extract_text_from_image(file):
-    """
-    OCR an image (png/jpg/jpeg). file can be path or file-like.
-    """
-    b = _read_bytes(file)
-    img = Image.open(io.BytesIO(b))
-    return pytesseract.image_to_string(img)
+    """Extract text from image using OCR.Space"""
+    return ocr_space_file(file)
+
+def extract_text_from_scanned_pdf(file):
+    """Convert PDF pages to images then send to OCR.Space"""
+    from pdf2image import convert_from_bytes
+
+    text = ""
+    images = convert_from_bytes(file.getvalue())
+    for img in images:
+        buf = BytesIO()
+        img.save(buf, format="PNG")
+        buf.seek(0)
+        text += ocr_space_file(buf) + "\n"
+    return text
