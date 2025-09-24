@@ -44,12 +44,12 @@ if menu == "Login / Register":
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
         submitted_login = st.form_submit_button("Login")
+
     if submitted_login:
         if validate_user(username, password):
             st.session_state.logged_in = True
             st.session_state.user = username
             st.success(f"Logged in as {username}")
-            st.experimental_rerun()  # reload to show main app
         else:
             st.error("Invalid credentials")
 
@@ -94,7 +94,7 @@ else:
     )
 
     if not uploaded_file:
-        st.warning("Please upload a PDF, DOCX, or image file to proceed.")
+        st.info("Please upload a PDF, DOCX, or image file to proceed.")
         st.stop()
 
     # -----------------------
@@ -155,4 +155,4 @@ else:
     if st.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.user = None
-        st.experimental_rerun()
+        st.success("Logged out successfully.")
