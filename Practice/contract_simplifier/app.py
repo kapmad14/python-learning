@@ -2,6 +2,8 @@
 import streamlit as st
 import sys
 import os
+import io
+import hashlib
 
 # ensure utils folder is importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "utils")))
@@ -15,10 +17,44 @@ from parser import (
 from ai_processor import summarize_contract
 from auth import register_user, validate_user, get_user_plan, ensure_default_user
 
-# Ensure we have a default user for quick tests
+# Ensure default test user exists
 ensure_default_user()
 
 st.set_page_config(page_title="Contract Simplifier", layout="wide")
+
+# -----------------------
+# Helpers
+# -----------------------
+def compute_bytes_hash(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+@st.cache_data(show_spinner=False)
+def cached_summarize(file_hash: str, style: str, text: str):
+    """
+    Cache wrapper around the summarizer. Keyed by file_hash + style.
+    Returns summary string.
+    """
+    # style is already applied by prefixing instructions into text
+    return summarize_contract(text)
+
+def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
+    """
+    Try to create a PDF from text using fpdf. If fpdf not installed, raise ImportError.
+    Returns bytes of the PDF.
+    """
+    try:
+        from fpdf import FPDF
+    except ImportError as ie:
+        raise ie
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    pdf.cell(0, 10, title, ln=1)
+    # add text in multi_cell
+    pdf.multi_cell(0, 8, text)
+    return pdf.output(dest='S').encode('latin-1')  # return bytes
 
 # -----------------------
 # Session state for login
@@ -31,7 +67,7 @@ if "logged_in" not in st.session_state:
 # Authentication flow (login + register)
 # -----------------------
 if not st.session_state.logged_in:
-    st.header("Login or Register (test stage)")
+    st.header("🔐 Login or Register (test stage)")
 
     # Login form
     with st.form("login_form"):
@@ -50,7 +86,7 @@ if not st.session_state.logged_in:
     st.write("---")
 
     # Register form
-    st.subheader("Register a new test user")
+    st.subheader("🆕 Register a new test user")
     with st.form("reg_form"):
         r_user = st.text_input("Choose username", key="ruser")
         r_pass = st.text_input("Choose password", type="password", key="rpass")
@@ -60,7 +96,7 @@ if not st.session_state.logged_in:
         try:
             register_user(r_user, r_pass, plan=r_plan)
             st.success("User created. Please login from the Login form.")
-            # do not auto-login on register (keeps behavior unchanged)
+            # preserve earlier behaviour: do not auto-login after register
         except ValueError as e:
             st.error(str(e))
 
@@ -68,77 +104,125 @@ if not st.session_state.logged_in:
 # Main App (after login)
 # -----------------------
 else:
+    # Sidebar user info / logout
     st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
     user_plan = get_user_plan(st.session_state.user) or "free"
     st.sidebar.write(f"Plan: **{user_plan}**")
 
-    # Logout button
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.user = None
         st.rerun()
 
-    st.title("Contract Simplifier MVP")
-    st.header("Upload contract (PDF / DOCX / image)")
+    # Top header
+    st.title("📄 Contract Simplifier")
+    st.caption("Upload a contract (PDF/DOCX/Image) and get a clear, structured plain-English summary.")
 
-    uploaded_file = st.file_uploader(
-        "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
-    )
+    # Tabs: Upload | Summary | Analysis
+    tab_upload, tab_summary, tab_analysis = st.tabs(["Upload", "Summary", "Analysis"])
 
-    if uploaded_file is not None:
-        file_type = uploaded_file.name.split(".")[-1].lower()
-        try:
-            # -----------------------
-            # Text extraction (with spinner)
-            # -----------------------
-            with st.spinner("Extracting text from the document (this may take a moment)..."):
-                # First, handle docx
-                if file_type == "docx":
-                    text = extract_text_from_docx(uploaded_file)
-                elif file_type == "pdf":
-                    # try text extraction first
-                    text = extract_text_from_pdf(uploaded_file)
-                    if not text or not text.strip():
-                        # fallback to OCR
-                        st.info("No selectable text found in PDF — running OCR (may take longer)...")
-                        text = extract_text_from_scanned_pdf(uploaded_file)
-                elif file_type in ("png", "jpg", "jpeg"):
-                    text = extract_text_from_image(uploaded_file)
+    # Shared state for extracted text & summary (kept in session_state)
+    if "last_file_hash" not in st.session_state:
+        st.session_state.last_file_hash = None
+    if "last_text" not in st.session_state:
+        st.session_state.last_text = ""
+    if "last_summary" not in st.session_state:
+        st.session_state.last_summary = ""
+    if "last_style" not in st.session_state:
+        st.session_state.last_style = None
+    if "orig_word_count" not in st.session_state:
+        st.session_state.orig_word_count = 0
+    if "summary_word_count" not in st.session_state:
+        st.session_state.summary_word_count = 0
+
+    # -----------------------
+    # UPLOAD TAB
+    # -----------------------
+    with tab_upload:
+        st.header("1) Upload document / image 📤")
+        st.write("Supported: PDF (text or scanned), DOCX, JPG, PNG. Scanned PDFs/images use OCR (cloud).")
+
+        uploaded_file = st.file_uploader(
+            "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
+        )
+
+        # Summarization style selector
+        style = st.selectbox(
+            "Summarization style",
+            ("Detailed Summary", "Bullet Points", "Executive Overview"),
+            help="Choose how the summary should be written."
+        )
+        st.write("")  # spacing
+
+        if not uploaded_file:
+            st.info("Please upload a PDF, DOCX, or image file to proceed.")
+        else:
+            # Read bytes once and compute hash
+            try:
+                file_bytes = uploaded_file.getvalue()
+            except Exception as e:
+                st.error("Could not read uploaded file. Please try again.")
+                file_bytes = None
+
+            if file_bytes:
+                file_hash = compute_bytes_hash(file_bytes)
+                st.session_state.last_file_hash = file_hash
+                # Create a BytesIO object to pass to parser functions (they expect file-like)
+                bio = io.BytesIO(file_bytes)
+                bio.name = uploaded_file.name  # give it a name so OCR code can inspect extension
+
+                # Extract text with spinner and friendly error messages
+                text = ""
+                file_ext = uploaded_file.name.split(".")[-1].lower()
+
+                try:
+                    with st.spinner("Extracting text from the document (this may take a moment)..."):
+                        if file_ext == "docx":
+                            # docx extraction
+                            text = extract_text_from_docx(bio)
+                        elif file_ext == "pdf":
+                            # try text extraction first (text-based PDFs)
+                            text = extract_text_from_pdf(bio)
+                            if not text or not text.strip():
+                                st.info("No selectable text found in PDF — running OCR (may take longer)...")
+                                # pass a fresh BytesIO
+                                bio2 = io.BytesIO(file_bytes)
+                                bio2.name = uploaded_file.name
+                                text = extract_text_from_scanned_pdf(bio2)
+                        elif file_ext in ("png", "jpg", "jpeg"):
+                            text = extract_text_from_image(bio)
+                        else:
+                            st.error("Unsupported file type")
+                            text = ""
+
+                except Exception as e:
+                    st.error("Couldn’t extract text from this file. Please upload a clearer copy or a different format.")
+                    st.exception(e)
+                    text = ""
+
+                if not text or not text.strip():
+                    st.error("No readable text found in the uploaded file.")
+                    # clear session text
+                    st.session_state.last_text = ""
+                    st.session_state.last_summary = ""
+                    st.session_state.orig_word_count = 0
+                    st.session_state.summary_word_count = 0
                 else:
-                    st.error("Unsupported file type")
-                    text = None
+                    # Save extracted text into session state for use by other tabs & caching key
+                    st.session_state.last_text = text
+                    orig_words = len(text.split())
+                    st.session_state.orig_word_count = orig_words
+                    st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
+                    # Keep selected style
+                    st.session_state.last_style = style
 
-            # -----------------------
-            # Validate extracted text
-            # -----------------------
-            if not text or not text.strip():
-                st.error("No text could be extracted from the file.")
-            else:
-                st.subheader("Extracted Text")
-                # allow user to view/scroll the extracted text
-                st.text_area("Contract Text", value=text, height=250)
+                    # Show extracted text inside an expander (so page stays clean)
+                    with st.expander("View extracted text (click to expand)"):
+                        st.text_area("Contract Text (extracted)", value=text, height=300)
 
-                # Optional gating: for free plan, restrict very long contracts (example)
-                if user_plan == "free" and len(text) > 50_000:
-                    st.warning("Free plan limits long contracts. Upgrade to paid for large uploads.")
-                else:
-                    # -----------------------
-                    # Summarize (with spinner)
-                    # -----------------------
-                    if st.button("Summarize Contract"):
-                        with st.spinner("Generating summary with AI (this may take a moment)..."):
-                            try:
-                                summary = summarize_contract(text)
-                            except Exception as e:
-                                st.error(f"AI summarization failed: {e}")
-                                summary = None
-
-                        if summary:
-                            st.success("Summary generated successfully!")
-                            st.subheader("Plain-English Summary")
-                            st.text_area("Summary", value=summary, height=250)
-
-                            # Download summary button
-                            st.download_button("Download summary (txt)", summary, file_name="summary.txt")
-        except Exception as e:
-            st.error(f"Error processing file: {e}")
+                    # If user wants to summarize immediately via Upload tab
+                    if st.button("Summarize now"):
+                        # Preference: use cache to avoid duplicate OpenAI calls
+                        # Build the text with style prefix so existing summarize_contract works unchanged
+                        if style == "Detailed Summary":
+                            style_prefix = "Please produce a detailed plain-English summary covering parties, obligations, deadlines, penalti_
