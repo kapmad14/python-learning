@@ -225,4 +225,127 @@ else:
                         # Preference: use cache to avoid duplicate OpenAI calls
                         # Build the text with style prefix so existing summarize_contract works unchanged
                         if style == "Detailed Summary":
-                            style_prefix = "Please produce a detailed plain-English summary covering parties, obligations, deadlines, penalti_
+                            style_prefix = (
+                                "Please produce a detailed plain-English summary covering parties, "
+                                "obligations, deadlines, penalties, termination and renewal clauses."
+                            )
+                        elif style == "Bullet Points":
+                            style_prefix = (
+                                "Please summarize the contract into concise bullet points focusing on "
+                                "key obligations, deadlines, penalties, termination and renewal."
+                            )
+                        else:  # Executive Overview
+                            style_prefix = (
+                                "Please provide a short executive overview highlighting the most "
+                                "critical terms, risks, and actions needed."
+                            )
+
+                        # Combine style instruction + contract text (ai_processor will wrap again, this is additive)
+                        prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
+
+                        # Use cache key: file_hash + style
+                        try:
+                            summary = cached_summarize(st.session_state.last_file_hash, style, prompt_text)
+                            st.session_state.last_summary = summary
+                            st.session_state.summary_word_count = len(summary.split())
+                            st.success("Summary generated successfully!")
+                        except Exception as e:
+                            st.error("AI summarization failed. Please try again or check your API key/limits.")
+                            st.exception(e)
+
+    # -----------------------
+    # SUMMARY TAB
+    # -----------------------
+    with tab_summary:
+        st.header("2) Summary ✍️")
+        if not st.session_state.last_text:
+            st.info("No document processed yet — upload and extract text in the Upload tab first.")
+        else:
+            st.subheader("Document statistics")
+            st.write(f"- Original word count: **{st.session_state.orig_word_count:,}**")
+            if st.session_state.last_summary:
+                st.write(f"- Summary word count: **{st.session_state.summary_word_count:,}**")
+                reduction = st.session_state.orig_word_count - st.session_state.summary_word_count
+                if st.session_state.orig_word_count > 0:
+                    pct = 100 * st.session_state.summary_word_count / st.session_state.orig_word_count
+                    st.write(f"- Compression: **{pct:.1f}%** of original")
+            else:
+                st.write("- No summary generated yet.")
+
+            st.write("---")
+
+            # Show the selected style
+            cur_style = st.session_state.last_style or "Detailed Summary"
+            st.write(f"**Selected style:** {cur_style}")
+
+            # Button to generate summary if not available
+            if not st.session_state.last_summary:
+                if st.button("Generate summary"):
+                    # Build prompt_text like above
+                    if cur_style == "Detailed Summary":
+                        style_prefix = (
+                            "Please produce a detailed plain-English summary covering parties, "
+                            "obligations, deadlines, penalties, termination and renewal clauses."
+                        )
+                    elif cur_style == "Bullet Points":
+                        style_prefix = (
+                            "Please summarize the contract into concise bullet points focusing on "
+                            "key obligations, deadlines, penalties, termination and renewal."
+                        )
+                    else:
+                        style_prefix = (
+                            "Please provide a short executive overview highlighting the most "
+                            "critical terms, risks, and actions needed."
+                        )
+
+                    prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
+                    try:
+                        with st.spinner("Generating summary with AI..."):
+                            summary = cached_summarize(st.session_state.last_file_hash, cur_style, prompt_text)
+                        st.session_state.last_summary = summary
+                        st.session_state.summary_word_count = len(summary.split())
+                        st.success("Summary generated successfully!")
+                    except Exception as e:
+                        st.error("AI summarization failed. Please try again later.")
+                        st.exception(e)
+
+            # Display summary
+            if st.session_state.last_summary:
+                st.subheader("Plain-English Summary")
+                st.text_area("Summary", value=st.session_state.last_summary, height=350)
+
+                # Download as TXT (always available)
+                st.download_button("⬇️ Download summary (txt)", st.session_state.last_summary, file_name="summary.txt", mime="text/plain")
+
+                # Download as PDF (attempt). If fpdf not installed, inform the user and fallback to TXT download only.
+                try:
+                    pdf_bytes = make_pdf_bytes(st.session_state.last_summary, title="Contract Summary")
+                    st.download_button("⬇️ Download summary (pdf)", pdf_bytes, file_name="summary.pdf", mime="application/pdf")
+                except ImportError:
+                    st.info("PDF export requires the 'fpdf' package. Install it (`pip install fpdf`) to enable PDF downloads.")
+                except Exception as e:
+                    st.error("Could not generate PDF. You can still download the TXT summary.")
+                    st.exception(e)
+
+    # -----------------------
+    # ANALYSIS TAB
+    # -----------------------
+    with tab_analysis:
+        st.header("3) Analysis 🔍")
+        st.write("This tab will show structured insights in future versions (clause extraction, risk scoring).")
+        if st.session_state.last_summary:
+            st.write("Quick highlights (auto-generated):")
+            # lightweight highlight generation by asking the model to extract key clauses — reuse cached summary if present
+            try:
+                # For a quick lightweight highlight we can derive from the summary text (no new AI call here).
+                # As placeholder, show first 3 lines of the summary as 'highlights'
+                lines = st.session_state.last_summary.strip().splitlines()
+                highlights = lines[:3] if lines else []
+                for i, hl in enumerate(highlights, start=1):
+                    st.markdown(f"**{i}.** {hl}")
+            except Exception:
+                st.info("No highlights available.")
+        else:
+            st.info("Generate a summary first to see analysis highlights.")
+
+    # End of main app
