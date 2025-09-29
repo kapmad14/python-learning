@@ -34,14 +34,9 @@ def cached_summarize(file_hash: str, style: str, text: str):
     Cache wrapper around the summarizer. Keyed by file_hash + style.
     Returns summary string.
     """
-    # style is already applied by prefixing instructions into text
     return summarize_contract(text)
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
-    """
-    Try to create a PDF from text using fpdf. If fpdf not installed, raise ImportError.
-    Returns bytes of the PDF.
-    """
     try:
         from fpdf import FPDF
     except ImportError as ie:
@@ -52,16 +47,33 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     pdf.add_page()
     pdf.set_font("Arial", size=12)
     pdf.cell(0, 10, title, ln=1)
-    # add text in multi_cell
     pdf.multi_cell(0, 8, text)
-    return pdf.output(dest='S').encode('latin-1')  # return bytes
+    return pdf.output(dest='S').encode('latin-1')
 
 # -----------------------
-# Session state for login
+# Session state for login & page navigation
 # -----------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.user = None
+
+# page state controls which pane is shown; default to Upload
+if "page" not in st.session_state:
+    st.session_state.page = "Upload"
+
+# Shared state for extracted text & summary
+if "last_file_hash" not in st.session_state:
+    st.session_state.last_file_hash = None
+if "last_text" not in st.session_state:
+    st.session_state.last_text = ""
+if "last_summary" not in st.session_state:
+    st.session_state.last_summary = ""
+if "last_style" not in st.session_state:
+    st.session_state.last_style = None
+if "orig_word_count" not in st.session_state:
+    st.session_state.orig_word_count = 0
+if "summary_word_count" not in st.session_state:
+    st.session_state.summary_word_count = 0
 
 # -----------------------
 # Authentication flow (login + register)
@@ -69,7 +81,6 @@ if "logged_in" not in st.session_state:
 if not st.session_state.logged_in:
     st.header("🔐 Login or Register (test stage)")
 
-    # Login form
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
@@ -78,14 +89,12 @@ if not st.session_state.logged_in:
         if validate_user(username, password):
             st.session_state.logged_in = True
             st.session_state.user = username
-            # silent reload into main app view
             st.rerun()
         else:
             st.error("Invalid credentials")
 
     st.write("---")
 
-    # Register form
     st.subheader("🆕 Register a new test user")
     with st.form("reg_form"):
         r_user = st.text_input("Choose username", key="ruser")
@@ -96,198 +105,116 @@ if not st.session_state.logged_in:
         try:
             register_user(r_user, r_pass, plan=r_plan)
             st.success("User created. Please login from the Login form.")
-            # preserve earlier behaviour: do not auto-login after register
         except ValueError as e:
             st.error(str(e))
+
+    st.stop()  # ensure we don't render the app below when not logged in
 
 # -----------------------
 # Main App (after login)
 # -----------------------
-else:
-    # Sidebar user info / logout
-    st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
-    user_plan = get_user_plan(st.session_state.user) or "free"
-    st.sidebar.write(f"Plan: **{user_plan}**")
+# Sidebar user info / logout
+st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
+user_plan = get_user_plan(st.session_state.user) or "free"
+st.sidebar.write(f"Plan: **{user_plan}**")
 
-    if st.sidebar.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.user = None
-        st.rerun()
+if st.sidebar.button("Logout"):
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.session_state.page = "Upload"
+    st.rerun()
 
-    # Top header
-    st.title("📄 Contract Simplifier")
-    st.caption("Upload a contract (PDF/DOCX/Image) and get a clear, structured plain-English summary.")
+# Header
+st.title("📄 Contract Simplifier")
+st.caption("Upload a contract (PDF/DOCX/Image) and get a clear, structured plain-English summary.")
 
-    # Tabs: Upload | Summary | Analysis
-    tab_upload, tab_summary, tab_analysis = st.tabs(["Upload", "Summary", "Analysis"])
+# Page selector (acts like tabs, but can be switched programmatically)
+page = st.radio("", ["Upload", "Summary", "Analysis"], index=["Upload","Summary","Analysis"].index(st.session_state.page))
 
-    # Shared state for extracted text & summary (kept in session_state)
-    if "last_file_hash" not in st.session_state:
-        st.session_state.last_file_hash = None
-    if "last_text" not in st.session_state:
-        st.session_state.last_text = ""
-    if "last_summary" not in st.session_state:
-        st.session_state.last_summary = ""
-    if "last_style" not in st.session_state:
-        st.session_state.last_style = None
-    if "orig_word_count" not in st.session_state:
-        st.session_state.orig_word_count = 0
-    if "summary_word_count" not in st.session_state:
-        st.session_state.summary_word_count = 0
+# Keep session_state.page in sync if user clicks radio manually
+if page != st.session_state.page:
+    st.session_state.page = page
 
-    # -----------------------
-    # UPLOAD TAB
-    # -----------------------
-    with tab_upload:
-        st.header("1) Upload document / image 📤")
-        st.write("Supported: PDF (text or scanned), DOCX, JPG, PNG. Scanned PDFs/images use OCR (cloud).")
+# -----------------------
+# UPLOAD PAGE
+# -----------------------
+if st.session_state.page == "Upload":
+    st.header("1) Upload document / image 📤")
+    st.write("Supported: PDF (text or scanned), DOCX, JPG, PNG. Scanned PDFs/images use OCR (cloud).")
 
-        uploaded_file = st.file_uploader(
-            "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
-        )
+    uploaded_file = st.file_uploader(
+        "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
+    )
 
-        # Summarization style selector
-        style = st.selectbox(
-            "Summarization style",
-            ("Detailed Summary", "Bullet Points", "Executive Overview"),
-            help="Choose how the summary should be written."
-        )
-        st.write("")  # spacing
+    style = st.selectbox(
+        "Summarization style",
+        ("Detailed Summary", "Bullet Points", "Executive Overview"),
+        help="Choose how the summary should be written."
+    )
+    st.write("")
 
-        if not uploaded_file:
-            st.info("Please upload a PDF, DOCX, or image file to proceed.")
-        else:
-            # Read bytes once and compute hash
+    if not uploaded_file:
+        st.info("Please upload a PDF, DOCX, or image file to proceed.")
+    else:
+        try:
+            file_bytes = uploaded_file.getvalue()
+        except Exception as e:
+            st.error("Could not read uploaded file. Please try again.")
+            file_bytes = None
+
+        if file_bytes:
+            file_hash = compute_bytes_hash(file_bytes)
+            st.session_state.last_file_hash = file_hash
+            bio = io.BytesIO(file_bytes)
+            bio.name = uploaded_file.name
+
+            text = ""
+            file_ext = uploaded_file.name.split(".")[-1].lower()
             try:
-                file_bytes = uploaded_file.getvalue()
+                with st.spinner("Extracting text from the document (this may take a moment)..."):
+                    if file_ext == "docx":
+                        text = extract_text_from_docx(bio)
+                    elif file_ext == "pdf":
+                        text = extract_text_from_pdf(bio)
+                        if not text or not text.strip():
+                            st.info("No selectable text found in PDF — running OCR (may take longer)...")
+                            bio2 = io.BytesIO(file_bytes)
+                            bio2.name = uploaded_file.name
+                            text = extract_text_from_scanned_pdf(bio2)
+                    elif file_ext in ("png", "jpg", "jpeg"):
+                        text = extract_text_from_image(bio)
+                    else:
+                        st.error("Unsupported file type")
+                        text = ""
             except Exception as e:
-                st.error("Could not read uploaded file. Please try again.")
-                file_bytes = None
-
-            if file_bytes:
-                file_hash = compute_bytes_hash(file_bytes)
-                st.session_state.last_file_hash = file_hash
-                # Create a BytesIO object to pass to parser functions (they expect file-like)
-                bio = io.BytesIO(file_bytes)
-                bio.name = uploaded_file.name  # give it a name so OCR code can inspect extension
-
-                # Extract text with spinner and friendly error messages
+                st.error("Couldn’t extract text from this file. Please upload a clearer copy or a different format.")
+                st.exception(e)
                 text = ""
-                file_ext = uploaded_file.name.split(".")[-1].lower()
 
-                try:
-                    with st.spinner("Extracting text from the document (this may take a moment)..."):
-                        if file_ext == "docx":
-                            # docx extraction
-                            text = extract_text_from_docx(bio)
-                        elif file_ext == "pdf":
-                            # try text extraction first (text-based PDFs)
-                            text = extract_text_from_pdf(bio)
-                            if not text or not text.strip():
-                                st.info("No selectable text found in PDF — running OCR (may take longer)...")
-                                # pass a fresh BytesIO
-                                bio2 = io.BytesIO(file_bytes)
-                                bio2.name = uploaded_file.name
-                                text = extract_text_from_scanned_pdf(bio2)
-                        elif file_ext in ("png", "jpg", "jpeg"):
-                            text = extract_text_from_image(bio)
-                        else:
-                            st.error("Unsupported file type")
-                            text = ""
-
-                except Exception as e:
-                    st.error("Couldn’t extract text from this file. Please upload a clearer copy or a different format.")
-                    st.exception(e)
-                    text = ""
-
-                if not text or not text.strip():
-                    st.error("No readable text found in the uploaded file.")
-                    # clear session text
-                    st.session_state.last_text = ""
-                    st.session_state.last_summary = ""
-                    st.session_state.orig_word_count = 0
-                    st.session_state.summary_word_count = 0
-                else:
-                    # Save extracted text into session state for use by other tabs & caching key
-                    st.session_state.last_text = text
-                    orig_words = len(text.split())
-                    st.session_state.orig_word_count = orig_words
-                    st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
-                    # Keep selected style
-                    st.session_state.last_style = style
-
-                    # Show extracted text inside an expander (so page stays clean)
-                    with st.expander("View extracted text (click to expand)"):
-                        st.text_area("Contract Text (extracted)", value=text, height=300)
-
-                    # If user wants to summarize immediately via Upload tab
-                    if st.button("Summarize now"):
-                        # Preference: use cache to avoid duplicate OpenAI calls
-                        # Build the text with style prefix so existing summarize_contract works unchanged
-                        if style == "Detailed Summary":
-                            style_prefix = (
-                                "Please produce a detailed plain-English summary covering parties, "
-                                "obligations, deadlines, penalties, termination and renewal clauses."
-                            )
-                        elif style == "Bullet Points":
-                            style_prefix = (
-                                "Please summarize the contract into concise bullet points focusing on "
-                                "key obligations, deadlines, penalties, termination and renewal."
-                            )
-                        else:  # Executive Overview
-                            style_prefix = (
-                                "Please provide a short executive overview highlighting the most "
-                                "critical terms, risks, and actions needed."
-                            )
-
-                        # Combine style instruction + contract text (ai_processor will wrap again, this is additive)
-                        prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
-
-                        # Use cache key: file_hash + style
-                        try:
-                            summary = cached_summarize(st.session_state.last_file_hash, style, prompt_text)
-                            st.session_state.last_summary = summary
-                            st.session_state.summary_word_count = len(summary.split())
-                            st.success("Summary generated successfully!")
-                        except Exception as e:
-                            st.error("AI summarization failed. Please try again or check your API key/limits.")
-                            st.exception(e)
-
-    # -----------------------
-    # SUMMARY TAB
-    # -----------------------
-    with tab_summary:
-        st.header("2) Summary ✍️")
-        if not st.session_state.last_text:
-            st.info("No document processed yet — upload and extract text in the Upload tab first.")
-        else:
-            st.subheader("Document statistics")
-            st.write(f"- Original word count: **{st.session_state.orig_word_count:,}**")
-            if st.session_state.last_summary:
-                st.write(f"- Summary word count: **{st.session_state.summary_word_count:,}**")
-                reduction = st.session_state.orig_word_count - st.session_state.summary_word_count
-                if st.session_state.orig_word_count > 0:
-                    pct = 100 * st.session_state.summary_word_count / st.session_state.orig_word_count
-                    st.write(f"- Compression: **{pct:.1f}%** of original")
+            if not text or not text.strip():
+                st.error("No readable text found in the uploaded file.")
+                st.session_state.last_text = ""
+                st.session_state.last_summary = ""
+                st.session_state.orig_word_count = 0
+                st.session_state.summary_word_count = 0
             else:
-                st.write("- No summary generated yet.")
+                st.session_state.last_text = text
+                orig_words = len(text.split())
+                st.session_state.orig_word_count = orig_words
+                st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
+                st.session_state.last_style = style
 
-            st.write("---")
+                with st.expander("View extracted text (click to expand)"):
+                    st.text_area("Contract Text (extracted)", value=text, height=300)
 
-            # Show the selected style
-            cur_style = st.session_state.last_style or "Detailed Summary"
-            st.write(f"**Selected style:** {cur_style}")
-
-            # Button to generate summary if not available
-            if not st.session_state.last_summary:
-                if st.button("Generate summary"):
-                    # Build prompt_text like above
-                    if cur_style == "Detailed Summary":
+                # Summarize now -> create summary and then switch to Summary page
+                if st.button("Summarize now"):
+                    if style == "Detailed Summary":
                         style_prefix = (
                             "Please produce a detailed plain-English summary covering parties, "
                             "obligations, deadlines, penalties, termination and renewal clauses."
                         )
-                    elif cur_style == "Bullet Points":
+                    elif style == "Bullet Points":
                         style_prefix = (
                             "Please summarize the contract into concise bullet points focusing on "
                             "key obligations, deadlines, penalties, termination and renewal."
@@ -299,53 +226,105 @@ else:
                         )
 
                     prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
+
                     try:
                         with st.spinner("Generating summary with AI..."):
-                            summary = cached_summarize(st.session_state.last_file_hash, cur_style, prompt_text)
+                            summary = cached_summarize(st.session_state.last_file_hash, style, prompt_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
                         st.success("Summary generated successfully!")
+                        # switch to summary page and rerun to show it immediately
+                        st.session_state.page = "Summary"
+                        st.rerun()
                     except Exception as e:
-                        st.error("AI summarization failed. Please try again later.")
+                        st.error("AI summarization failed. Please try again or check your API key/limits.")
                         st.exception(e)
 
-            # Display summary
-            if st.session_state.last_summary:
-                st.subheader("Plain-English Summary")
-                st.text_area("Summary", value=st.session_state.last_summary, height=350)
+# -----------------------
+# SUMMARY PAGE
+# -----------------------
+elif st.session_state.page == "Summary":
+    st.header("2) Summary ✍️")
+    if not st.session_state.last_text:
+        st.info("No document processed yet — upload and extract text in the Upload page first.")
+    else:
+        st.subheader("Document statistics")
+        st.write(f"- Original word count: **{st.session_state.orig_word_count:,}**")
+        if st.session_state.last_summary:
+            st.write(f"- Summary word count: **{st.session_state.summary_word_count:,}**")
+            if st.session_state.orig_word_count > 0:
+                pct = 100 * st.session_state.summary_word_count / st.session_state.orig_word_count
+                st.write(f"- Compression: **{pct:.1f}%** of original")
+        else:
+            st.write("- No summary generated yet.")
 
-                # Download as TXT (always available)
-                st.download_button("⬇️ Download summary (txt)", st.session_state.last_summary, file_name="summary.txt", mime="text/plain")
+        st.write("---")
+        cur_style = st.session_state.last_style or "Detailed Summary"
+        st.write(f"**Selected style:** {cur_style}")
 
-                # Download as PDF (attempt). If fpdf not installed, inform the user and fallback to TXT download only.
+        # If no summary yet, allow generation here (also auto-switches after generation)
+        if not st.session_state.last_summary:
+            if st.button("Generate summary"):
+                if cur_style == "Detailed Summary":
+                    style_prefix = (
+                        "Please produce a detailed plain-English summary covering parties, "
+                        "obligations, deadlines, penalties, termination and renewal clauses."
+                    )
+                elif cur_style == "Bullet Points":
+                    style_prefix = (
+                        "Please summarize the contract into concise bullet points focusing on "
+                        "key obligations, deadlines, penalties, termination and renewal."
+                    )
+                else:
+                    style_prefix = (
+                        "Please provide a short executive overview highlighting the most "
+                        "critical terms, risks, and actions needed."
+                    )
+
+                prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
                 try:
-                    pdf_bytes = make_pdf_bytes(st.session_state.last_summary, title="Contract Summary")
-                    st.download_button("⬇️ Download summary (pdf)", pdf_bytes, file_name="summary.pdf", mime="application/pdf")
-                except ImportError:
-                    st.info("PDF export requires the 'fpdf' package. Install it (`pip install fpdf`) to enable PDF downloads.")
+                    with st.spinner("Generating summary with AI..."):
+                        summary = cached_summarize(st.session_state.last_file_hash, cur_style, prompt_text)
+                    st.session_state.last_summary = summary
+                    st.session_state.summary_word_count = len(summary.split())
+                    st.success("Summary generated successfully!")
+                    # ensure we remain on Summary page (already there), but rerun to reflect state
+                    st.session_state.page = "Summary"
+                    st.rerun()
                 except Exception as e:
-                    st.error("Could not generate PDF. You can still download the TXT summary.")
+                    st.error("AI summarization failed. Please try again later.")
                     st.exception(e)
 
-    # -----------------------
-    # ANALYSIS TAB
-    # -----------------------
-    with tab_analysis:
-        st.header("3) Analysis 🔍")
-        st.write("This tab will show structured insights in future versions (clause extraction, risk scoring).")
+        # Display summary if available
         if st.session_state.last_summary:
-            st.write("Quick highlights (auto-generated):")
-            # lightweight highlight generation by asking the model to extract key clauses — reuse cached summary if present
-            try:
-                # For a quick lightweight highlight we can derive from the summary text (no new AI call here).
-                # As placeholder, show first 3 lines of the summary as 'highlights'
-                lines = st.session_state.last_summary.strip().splitlines()
-                highlights = lines[:3] if lines else []
-                for i, hl in enumerate(highlights, start=1):
-                    st.markdown(f"**{i}.** {hl}")
-            except Exception:
-                st.info("No highlights available.")
-        else:
-            st.info("Generate a summary first to see analysis highlights.")
+            st.subheader("Plain-English Summary")
+            st.text_area("Summary", value=st.session_state.last_summary, height=350)
 
-    # End of main app
+            st.download_button("⬇️ Download summary (txt)", st.session_state.last_summary, file_name="summary.txt", mime="text/plain")
+
+            try:
+                pdf_bytes = make_pdf_bytes(st.session_state.last_summary, title="Contract Summary")
+                st.download_button("⬇️ Download summary (pdf)", pdf_bytes, file_name="summary.pdf", mime="application/pdf")
+            except ImportError:
+                st.info("PDF export requires the 'fpdf' package. Install it (`pip install fpdf`) to enable PDF downloads.")
+            except Exception as e:
+                st.error("Could not generate PDF. You can still download the TXT summary.")
+                st.exception(e)
+
+# -----------------------
+# ANALYSIS PAGE
+# -----------------------
+else:  # Analysis
+    st.header("3) Analysis 🔍")
+    st.write("This page will show structured insights (clause extraction, risk scoring) in future versions.")
+    if st.session_state.last_summary:
+        st.write("Quick highlights (auto-generated):")
+        try:
+            lines = st.session_state.last_summary.strip().splitlines()
+            highlights = lines[:3] if lines else []
+            for i, hl in enumerate(highlights, start=1):
+                st.markdown(f"**{i}.** {hl}")
+        except Exception:
+            st.info("No highlights available.")
+    else:
+        st.info("Generate a summary first to see analysis highlights.")
