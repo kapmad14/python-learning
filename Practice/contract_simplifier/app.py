@@ -44,7 +44,7 @@ if not st.session_state.logged_in:
             st.session_state.logged_in = True
             st.session_state.user = username
             st.success(f"Logged in as {username}")
-            st.experimental_rerun()  # directly reload app after login
+            st.rerun()  # directly reload app after login
         else:
             st.error("Invalid credentials")
 
@@ -74,7 +74,7 @@ else:
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.user = None
-        st.experimental_rerun()
+        st.rerun()
 
     st.header("Upload contract (PDF / DOCX / image)")
 
