@@ -19,7 +19,6 @@ from auth import register_user, validate_user, get_user_plan, ensure_default_use
 ensure_default_user()
 
 st.set_page_config(page_title="Contract Simplifier", layout="wide")
-st.title("Contract Simplifier MVP")
 
 # -----------------------
 # Session state for login
@@ -29,7 +28,7 @@ if "logged_in" not in st.session_state:
     st.session_state.user = None
 
 # -----------------------
-# Authentication flow
+# Authentication flow (login + register)
 # -----------------------
 if not st.session_state.logged_in:
     st.header("Login or Register (test stage)")
@@ -43,8 +42,8 @@ if not st.session_state.logged_in:
         if validate_user(username, password):
             st.session_state.logged_in = True
             st.session_state.user = username
-            st.success(f"Logged in as {username}")
-            st.rerun()  # directly reload app after login
+            # silent reload into main app view
+            st.rerun()
         else:
             st.error("Invalid credentials")
 
@@ -61,21 +60,25 @@ if not st.session_state.logged_in:
         try:
             register_user(r_user, r_pass, plan=r_plan)
             st.success("User created. Please login from the Login form.")
+            # do not auto-login on register (keeps behavior unchanged)
         except ValueError as e:
             st.error(str(e))
 
+# -----------------------
+# Main App (after login)
+# -----------------------
 else:
-    # -----------------------
-    # Main App (after login)
-    # -----------------------
     st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
     user_plan = get_user_plan(st.session_state.user) or "free"
     st.sidebar.write(f"Plan: **{user_plan}**")
+
+    # Logout button
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.user = None
         st.rerun()
 
+    st.title("Contract Simplifier MVP")
     st.header("Upload contract (PDF / DOCX / image)")
 
     uploaded_file = st.file_uploader(
@@ -85,45 +88,57 @@ else:
     if uploaded_file is not None:
         file_type = uploaded_file.name.split(".")[-1].lower()
         try:
-            # First, handle docx
-            if file_type == "docx":
-                text = extract_text_from_docx(uploaded_file)
-            elif file_type == "pdf":
-                # try text extraction first
-                text = extract_text_from_pdf(uploaded_file)
-                if not text or not text.strip():
-                    # fallback to OCR
-                    st.info("No selectable text found in PDF — running OCR (may take longer)...")
-                    text = extract_text_from_scanned_pdf(uploaded_file)
-            elif file_type in ("png", "jpg", "jpeg"):
-                text = extract_text_from_image(uploaded_file)
-            else:
-                st.error("Unsupported file type")
-                text = None
+            # -----------------------
+            # Text extraction (with spinner)
+            # -----------------------
+            with st.spinner("Extracting text from the document (this may take a moment)..."):
+                # First, handle docx
+                if file_type == "docx":
+                    text = extract_text_from_docx(uploaded_file)
+                elif file_type == "pdf":
+                    # try text extraction first
+                    text = extract_text_from_pdf(uploaded_file)
+                    if not text or not text.strip():
+                        # fallback to OCR
+                        st.info("No selectable text found in PDF — running OCR (may take longer)...")
+                        text = extract_text_from_scanned_pdf(uploaded_file)
+                elif file_type in ("png", "jpg", "jpeg"):
+                    text = extract_text_from_image(uploaded_file)
+                else:
+                    st.error("Unsupported file type")
+                    text = None
 
+            # -----------------------
+            # Validate extracted text
+            # -----------------------
             if not text or not text.strip():
                 st.error("No text could be extracted from the file.")
             else:
                 st.subheader("Extracted Text")
+                # allow user to view/scroll the extracted text
                 st.text_area("Contract Text", value=text, height=250)
 
-                # Optional gating: for free plan, restrict very long contracts
+                # Optional gating: for free plan, restrict very long contracts (example)
                 if user_plan == "free" and len(text) > 50_000:
                     st.warning("Free plan limits long contracts. Upgrade to paid for large uploads.")
                 else:
-                    # Summarize (this calls OpenAI)
-                    with st.spinner("Generating summary..."):
-                        try:
-                            summary = summarize_contract(text)
-                        except Exception as e:
-                            st.error(f"AI summarization failed: {e}")
-                            summary = None
+                    # -----------------------
+                    # Summarize (with spinner)
+                    # -----------------------
+                    if st.button("Summarize Contract"):
+                        with st.spinner("Generating summary with AI (this may take a moment)..."):
+                            try:
+                                summary = summarize_contract(text)
+                            except Exception as e:
+                                st.error(f"AI summarization failed: {e}")
+                                summary = None
 
-                    if summary:
-                        st.subheader("Plain-English Summary")
-                        st.text_area("Summary", value=summary, height=250)
+                        if summary:
+                            st.success("Summary generated successfully!")
+                            st.subheader("Plain-English Summary")
+                            st.text_area("Summary", value=summary, height=250)
 
-                        # Download summary button
-                        st.download_button("Download summary (txt)", summary, file_name="summary.txt")
+                            # Download summary button
+                            st.download_button("Download summary (txt)", summary, file_name="summary.txt")
         except Exception as e:
             st.error(f"Error processing file: {e}")
