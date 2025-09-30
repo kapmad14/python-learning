@@ -4,6 +4,7 @@ import sys
 import os
 import io
 import hashlib
+import logging
 
 # ensure utils folder is importable
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "utils")))
@@ -17,6 +18,11 @@ from parser import (
 from ai_processor import summarize_contract
 from auth import register_user, validate_user, get_user_plan, ensure_default_user
 
+# Setup logging (Streamlit captures stdout/stderr)
+logger = logging.getLogger("contract_simplifier")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
+
 # Ensure default test user exists
 ensure_default_user()
 
@@ -29,14 +35,19 @@ def compute_bytes_hash(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 @st.cache_data(show_spinner=False)
-def cached_summarize(file_hash: str, style: str, text: str):
+def cached_summarize(file_hash: str, style: str, prompt_text: str):
     """
     Cache wrapper around the summarizer. Keyed by file_hash + style.
     Returns summary string.
     """
-    return summarize_contract(text)
+    # call your existing ai_processor.summarize_contract (which should call OpenAI)
+    return summarize_contract(prompt_text)
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
+    """
+    Try to create a PDF from text using fpdf. If fpdf not installed, raise ImportError.
+    Returns bytes of the PDF.
+    """
     try:
         from fpdf import FPDF
     except ImportError as ie:
@@ -48,10 +59,15 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     pdf.set_font("Arial", size=12)
     pdf.cell(0, 10, title, ln=1)
     pdf.multi_cell(0, 8, text)
-    return pdf.output(dest='S').encode('latin-1')
+    return pdf.output(dest='S').encode('latin-1')  # return bytes
 
 # -----------------------
-# Session state for login & page navigation
+# Configuration: limits (change as needed)
+# -----------------------
+MAX_FREE_BYTES = 4 * 1024 * 1024  # 4 MB free upload limit (adjustable)
+
+# -----------------------
+# Session state initialization
 # -----------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -89,6 +105,7 @@ if not st.session_state.logged_in:
         if validate_user(username, password):
             st.session_state.logged_in = True
             st.session_state.user = username
+            # silent reload into main app view
             st.rerun()
         else:
             st.error("Invalid credentials")
@@ -105,15 +122,16 @@ if not st.session_state.logged_in:
         try:
             register_user(r_user, r_pass, plan=r_plan)
             st.success("User created. Please login from the Login form.")
+            # keep previous behavior: do not auto-login after register
         except ValueError as e:
             st.error(str(e))
 
-    st.stop()  # ensure we don't render the app below when not logged in
+    st.stop()  # don't render the app below when not logged in
 
 # -----------------------
 # Main App (after login)
 # -----------------------
-# Sidebar user info / logout
+# Sidebar: user info, plan, logout
 st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
 user_plan = get_user_plan(st.session_state.user) or "free"
 st.sidebar.write(f"Plan: **{user_plan}**")
@@ -128,10 +146,8 @@ if st.sidebar.button("Logout"):
 st.title("📄 Contract Simplifier")
 st.caption("Upload a contract (PDF/DOCX/Image) and get a clear, structured plain-English summary.")
 
-# Page selector (acts like tabs, but can be switched programmatically)
+# Page selector (radio) — keeps programmatic switching capability
 page = st.radio("", ["Upload", "Summary", "Analysis"], index=["Upload","Summary","Analysis"].index(st.session_state.page))
-
-# Keep session_state.page in sync if user clicks radio manually
 if page != st.session_state.page:
     st.session_state.page = page
 
@@ -140,34 +156,46 @@ if page != st.session_state.page:
 # -----------------------
 if st.session_state.page == "Upload":
     st.header("1) Upload document / image 📤")
-    st.write("Supported: PDF (text or scanned), DOCX, JPG, PNG. Scanned PDFs/images use OCR (cloud).")
+    st.write("Supported: PDF (text or scanned), DOCX, JPG, PNG. Scanned PDFs/images use cloud OCR (OCR.Space).")
 
     uploaded_file = st.file_uploader(
         "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
     )
 
+    # Style selector
     style = st.selectbox(
         "Summarization style",
         ("Detailed Summary", "Bullet Points", "Executive Overview"),
         help="Choose how the summary should be written."
     )
-    st.write("")
+    st.write("")  # spacing
 
     if not uploaded_file:
         st.info("Please upload a PDF, DOCX, or image file to proceed.")
     else:
+        # Read bytes once
         try:
             file_bytes = uploaded_file.getvalue()
         except Exception as e:
             st.error("Could not read uploaded file. Please try again.")
+            logger.exception("Failed to read uploaded_file: %s", e)
             file_bytes = None
 
         if file_bytes:
+            file_size = len(file_bytes)
+            if user_plan == "free" and file_size > MAX_FREE_BYTES:
+                st.error(
+                    f"Free plan allows files up to {MAX_FREE_BYTES // 1024 // 1024} MB. "
+                    f"Your file is {file_size // 1024 // 1024} MB. Please upgrade or upload a smaller file."
+                )
+                st.stop()
+
             file_hash = compute_bytes_hash(file_bytes)
             st.session_state.last_file_hash = file_hash
             bio = io.BytesIO(file_bytes)
-            bio.name = uploaded_file.name
+            bio.name = uploaded_file.name  # help parser/or OCR know file extension
 
+            # Extract text using your parser (which now tries pdfplumber then OCR.Space)
             text = ""
             file_ext = uploaded_file.name.split(".")[-1].lower()
             try:
@@ -175,12 +203,8 @@ if st.session_state.page == "Upload":
                     if file_ext == "docx":
                         text = extract_text_from_docx(bio)
                     elif file_ext == "pdf":
+                        # extract_text_from_pdf in your parser does both text-extract and OCR fallback
                         text = extract_text_from_pdf(bio)
-                        if not text or not text.strip():
-                            st.info("No selectable text found in PDF — running OCR (may take longer)...")
-                            bio2 = io.BytesIO(file_bytes)
-                            bio2.name = uploaded_file.name
-                            text = extract_text_from_scanned_pdf(bio2)
                     elif file_ext in ("png", "jpg", "jpeg"):
                         text = extract_text_from_image(bio)
                     else:
@@ -209,6 +233,7 @@ if st.session_state.page == "Upload":
 
                 # Summarize now -> create summary and then switch to Summary page
                 if st.button("Summarize now"):
+                    # Build style prefix safely (use multi-line strings)
                     if style == "Detailed Summary":
                         style_prefix = (
                             "Please produce a detailed plain-English summary covering parties, "
@@ -219,7 +244,7 @@ if st.session_state.page == "Upload":
                             "Please summarize the contract into concise bullet points focusing on "
                             "key obligations, deadlines, penalties, termination and renewal."
                         )
-                    else:
+                    else:  # Executive Overview
                         style_prefix = (
                             "Please provide a short executive overview highlighting the most "
                             "critical terms, risks, and actions needed."
@@ -233,7 +258,7 @@ if st.session_state.page == "Upload":
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
                         st.success("Summary generated successfully!")
-                        # switch to summary page and rerun to show it immediately
+                        # switch to Summary page and rerun to show it immediately
                         st.session_state.page = "Summary"
                         st.rerun()
                     except Exception as e:
@@ -288,7 +313,7 @@ elif st.session_state.page == "Summary":
                     st.session_state.last_summary = summary
                     st.session_state.summary_word_count = len(summary.split())
                     st.success("Summary generated successfully!")
-                    # ensure we remain on Summary page (already there), but rerun to reflect state
+                    # remain on Summary page and rerun
                     st.session_state.page = "Summary"
                     st.rerun()
                 except Exception as e:
@@ -300,8 +325,10 @@ elif st.session_state.page == "Summary":
             st.subheader("Plain-English Summary")
             st.text_area("Summary", value=st.session_state.last_summary, height=350)
 
+            # TXT download
             st.download_button("⬇️ Download summary (txt)", st.session_state.last_summary, file_name="summary.txt", mime="text/plain")
 
+            # PDF download (optional, requires fpdf)
             try:
                 pdf_bytes = make_pdf_bytes(st.session_state.last_summary, title="Contract Summary")
                 st.download_button("⬇️ Download summary (pdf)", pdf_bytes, file_name="summary.pdf", mime="application/pdf")

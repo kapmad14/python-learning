@@ -60,8 +60,10 @@ streamlit
 pdfplumber
 python-docx
 pytesseract
-pdf2image
 Pillow
 openai
 fpdf
+pdfplumber
+requests
+
 
