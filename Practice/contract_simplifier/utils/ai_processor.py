@@ -1,39 +1,49 @@
 # utils/ai_processor.py
-# OpenAI summarization wrapper (uses OpenAI Python >=1.0.0 interface)
-import os
 import openai
 import streamlit as st
+import os
 
-try:
+# Load API key
+if "OPENAI_API_KEY" in st.secrets:
     openai.api_key = st.secrets["OPENAI_API_KEY"]
-except KeyError:
-    st.error("OpenAI API key not found. Add it in Streamlit Secrets under Settings → Secrets.")
-    openai.api_key = None
-    
+else:
+    openai.api_key = os.getenv("OPENAI_API_KEY")
 
-def summarize_contract(text, model="gpt-3.5-turbo", max_tokens=1000):
+def summarize_contract(text, style="medium"):
     """
-    Summarize contract text into plain English with focus on obligations, deadlines, penalties, termination, renewal.
-    Returns a string summary.
+    Summarize a contract into plain English.
+    style: "short", "medium", "detailed"
     """
-    if not openai.api_key:
-        raise RuntimeError("OpenAI API key not set. Set OPENAI_API_KEY env var or hard-code for testing.")
 
-    prompt = f"""
-You are a helpful legal assistant. Read the contract below and produce a plain-English summary.
-Keep it concise but cover: parties, obligations, deadlines, payment terms, penalties/liabilities, termination/renewal, and any critical risk.
-Also return a short "Key Clauses" list with clause name and short one-line extraction.
+    # Adjust style-specific instructions
+    if style == "short":
+        style_prefix = (
+            "Provide a very brief summary (1–2 paragraphs) highlighting the core purpose, "
+            "parties involved, and key obligations."
+        )
+    elif style == "detailed":
+        style_prefix = (
+            "Provide a comprehensive plain-English summary. Cover parties, obligations, "
+            "deadlines, penalties, payment terms, and any risks or unusual clauses."
+        )
+    else:  # default medium
+        style_prefix = (
+            "Provide a balanced plain-English summary highlighting key clauses, obligations, "
+            "and important risks in a concise manner."
+        )
 
-Contract:
-{text}
-"""
+    try:
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",   # Using cheaper model for testing
+            messages=[
+                {"role": "system", "content": "You are a legal assistant specializing in contract simplification."},
+                {"role": "user", "content": f"{style_prefix}\n\nContract text:\n{text}"}
+            ],
+            max_tokens=800,
+            temperature=0.5,
+        )
 
-    resp = openai.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.2,
-        max_tokens=max_tokens
-    )
+        return response.choices[0].message.content.strip()
 
-    # the response shape: resp.choices[0].message.content
-    return resp.choices[0].message.content
+    except Exception as e:
+        return f"AI summarization failed: {str(e)}"
