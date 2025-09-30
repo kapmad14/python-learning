@@ -1,60 +1,66 @@
 # utils/parser.py
 """
 Parser utilities: PDF/DOCX/text extraction and OCR via OCR.Space cloud.
-Fixed to avoid recursion: extract_text_from_pdf is the public function that
-tries selectable-text extraction first, then falls back to OCR on PDF bytes.
+Safe, non-raising OCR helper and clean PDF->text flow.
+Public functions used by the app:
+- extract_text_from_pdf(file)
+- extract_text_from_docx(file)
+- extract_text_from_image(file)
+- extract_text_from_scanned_pdf(file)
 """
 
 import io
 import logging
 from typing import Optional
+import os
 
 import pdfplumber
 import requests
 from docx import Document
 import streamlit as st
-import os
 
 logger = logging.getLogger(__name__)
 
-# OCR key from Streamlit secrets
-OCR_SPACE_API_KEY = st.secrets.get("OCR_SPACE_API_KEY", "")
-
-# ---------- OCR.Space request helper ----------
-def ocr_space_request(file_bytes: bytes, filename: str, language: str = "eng"):
+# ---------- OCR.Space request helper (safe) ----------
+def ocr_space_request(file_bytes: bytes, filename: str, language: str = "eng") -> str:
     """
     Send bytes to OCR.Space and return recognized text.
-    Raises RuntimeError on failure.
+    This function is conservative: on any failure it logs and returns an empty string
+    rather than raising an exception, so the app can show a friendly message.
     """
-    if not OCR_SPACE_API_KEY:
-        raise RuntimeError("OCR_SPACE_API_KEY not configured in Streamlit secrets.")
+    # Lazy read the secret to avoid import-time errors
+    OCR_KEY = st.secrets.get("OCR_SPACE_API_KEY", "") if hasattr(st, "secrets") else os.environ.get("OCR_SPACE_API_KEY", "")
+
+    if not OCR_KEY:
+        logger.warning("OCR_SPACE_API_KEY not set; OCR will be skipped and return empty text.")
+        return ""
 
     url = "https://api.ocr.space/parse/image"
     payload = {
-        "apikey": OCR_SPACE_API_KEY,
+        "apikey": OCR_KEY,
         "language": language,
         "isOverlayRequired": False,
     }
     files = {"file": (filename, file_bytes)}
+
     try:
         resp = requests.post(url, data=payload, files=files, timeout=120)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.exception("OCR.Space request failed: %s", e)
-        raise RuntimeError(f"OCR request failed: {e}") from e
+        return ""
 
     try:
         result = resp.json()
     except Exception as e:
         logger.exception("OCR.Space returned non-JSON response: %s", e)
-        raise RuntimeError("OCR service returned an unexpected response format.") from e
+        return ""
 
     if result.get("IsErroredOnProcessing", False):
+        # Log the error message(s) and return empty string
         err = result.get("ErrorMessage")
-        if isinstance(err, list):
-            err = err[0] if err else "OCR processing error"
-        logger.error("OCR.Space returned an error: %s", err)
-        raise RuntimeError(f"OCR service error: {err}")
+        logger.error("OCR.Space processing error: %s", err)
+        return ""
 
     parsed_texts = []
     for pr in result.get("ParsedResults", []):
@@ -98,7 +104,7 @@ def _extract_text_from_pdf_plumber(file) -> str:
 def extract_text_from_pdf(file) -> str:
     """
     Public helper used by the app.
-    Tries pdfplumber first (fast, no external calls). If that yields no text,
+    Tries pdfplumber first (fast, no external calls). If no selectable text found,
     falls back to sending the PDF bytes to OCR.Space (cloud OCR).
     Returns extracted text (possibly empty string on failure).
     """
@@ -118,19 +124,19 @@ def extract_text_from_pdf(file) -> str:
             filename = "file.pdf"
         else:
             # file is path-like
-            with open(file, "rb") as fh:
-                b = fh.read()
+            try:
+                with open(file, "rb") as fh:
+                    b = fh.read()
+            except Exception as e:
+                logger.exception("Failed to read file path for OCR fallback: %s", e)
+                return ""
             filename = os.path.basename(file)
 
         if not filename.lower().endswith(".pdf"):
             filename = filename + ".pdf"
 
-        try:
-            text = ocr_space_request(b, filename)
-            return text
-        except Exception as e:
-            logger.exception("PDF OCR fallback failed: %s", e)
-            return ""
+        text = ocr_space_request(b, filename)
+        return text
     except Exception as e:
         logger.exception("extract_text_from_pdf encountered an unexpected error: %s", e)
         return ""
@@ -157,6 +163,50 @@ def extract_text_from_docx(file) -> str:
 def extract_text_from_image(file) -> str:
     """
     Send an image (uploaded file or bytes) to OCR.Space and return text.
+    Safe: returns empty string on failures.
     """
     try:
         if hasattr(file, "getvalue"):
+            b = file.getvalue()
+            filename = getattr(file, "name", "image.png")
+        elif isinstance(file, (bytes, bytearray)):
+            b = file
+            filename = "image.png"
+        else:
+            logger.error("extract_text_from_image: unsupported input type")
+            return ""
+        text = ocr_space_request(b, filename)
+        return text
+    except Exception as e:
+        logger.exception("extract_text_from_image failed: %s", e)
+        return ""
+
+# ---------- Scanned PDF extraction (explicit) ----------
+def extract_text_from_scanned_pdf(file) -> str:
+    """
+    Explicitly send PDF bytes to OCR.Space. Accepts UploadedFile, bytes, or path.
+    """
+    try:
+        if hasattr(file, "getvalue"):
+            b = file.getvalue()
+            filename = getattr(file, "name", "file.pdf")
+        elif isinstance(file, (bytes, bytearray)):
+            b = file
+            filename = "file.pdf"
+        else:
+            try:
+                with open(file, "rb") as fh:
+                    b = fh.read()
+            except Exception as e:
+                logger.exception("extract_text_from_scanned_pdf failed to read file path: %s", e)
+                return ""
+            filename = os.path.basename(file)
+
+        if not filename.lower().endswith(".pdf"):
+            filename = filename + ".pdf"
+
+        text = ocr_space_request(b, filename)
+        return text
+    except Exception as e:
+        logger.exception("extract_text_from_scanned_pdf failed: %s", e)
+        return ""
