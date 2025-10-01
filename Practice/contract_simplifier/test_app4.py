@@ -35,15 +35,13 @@ def compute_bytes_hash(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 @st.cache_data(show_spinner=False)
-def cached_summarize(file_hash: str, format_style: str, length: str, prompt_text: str):
+def cached_summarize(file_hash: str, style: str, prompt_text: str):
     """
-    Cache wrapper around the summarizer. Keyed by file_hash + format_style + length.
+    Cache wrapper around the summarizer. Keyed by file_hash + style.
     Returns summary string.
     """
-    # We pass the full prompt_text (which includes the format-style prefix and the contract text)
-    # to summarize_contract, and let the summarizer also receive the length instruction via the
-    # 'length' parameter (ai_processor.summarize_contract handles the length parameter).
-    return summarize_contract(prompt_text, style=length)
+    # call your existing ai_processor.summarize_contract (which should call OpenAI)
+    return summarize_contract(prompt_text)
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     """
@@ -88,10 +86,6 @@ if "last_summary" not in st.session_state:
     st.session_state.last_summary = ""
 if "last_style" not in st.session_state:
     st.session_state.last_style = None
-# NEW: summary length stored in session (short/medium/detailed)
-if "last_length" not in st.session_state:
-    st.session_state.last_length = "medium"
-
 if "orig_word_count" not in st.session_state:
     st.session_state.orig_word_count = 0
 if "summary_word_count" not in st.session_state:
@@ -168,19 +162,11 @@ if st.session_state.page == "Upload":
         "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
     )
 
-    # Format style selector (keeps original behavior)
-    format_style = st.selectbox(
+    # Style selector
+    style = st.selectbox(
         "Summarization style",
         ("Detailed Summary", "Bullet Points", "Executive Overview"),
         help="Choose how the summary should be written."
-    )
-
-    # NEW: Summary length selector (short / medium / detailed)
-    length = st.selectbox(
-        "Summary length",
-        ("short", "medium", "detailed"),
-        index=("short", "medium", "detailed").index(st.session_state.last_length),
-        help="Choose summary length: short / medium / detailed."
     )
     st.write("")  # spacing
 
@@ -237,24 +223,23 @@ if st.session_state.page == "Upload":
                 st.session_state.summary_word_count = 0
             else:
                 st.session_state.last_text = text
-                st.session_state.last_style = format_style
-                st.session_state.last_length = length
                 orig_words = len(text.split())
                 st.session_state.orig_word_count = orig_words
                 st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
+                st.session_state.last_style = style
 
                 with st.expander("View extracted text (click to expand)"):
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
                 # Summarize now -> create summary and then switch to Summary page
                 if st.button("Summarize now"):
-                    # Build format-style prefix safely (use multi-line strings)
-                    if format_style == "Detailed Summary":
+                    # Build style prefix safely (use multi-line strings)
+                    if style == "Detailed Summary":
                         style_prefix = (
                             "Please produce a detailed plain-English summary covering parties, "
                             "obligations, deadlines, penalties, termination and renewal clauses."
                         )
-                    elif format_style == "Bullet Points":
+                    elif style == "Bullet Points":
                         style_prefix = (
                             "Please summarize the contract into concise bullet points focusing on "
                             "key obligations, deadlines, penalties, termination and renewal."
@@ -265,13 +250,11 @@ if st.session_state.page == "Upload":
                             "critical terms, risks, and actions needed."
                         )
 
-                    # Build prompt_text (format prefix + contract)
                     prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
 
                     try:
                         with st.spinner("Generating summary with AI..."):
-                            # Use cache keyed by file_hash + format_style + length
-                            summary = cached_summarize(st.session_state.last_file_hash, format_style, length, prompt_text)
+                            summary = cached_summarize(st.session_state.last_file_hash, style, prompt_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
                         st.success("Summary generated successfully!")
@@ -302,8 +285,7 @@ elif st.session_state.page == "Summary":
 
         st.write("---")
         cur_style = st.session_state.last_style or "Detailed Summary"
-        cur_length = st.session_state.last_length or "medium"
-        st.write(f"**Selected style:** {cur_style} • **Length:** {cur_length}")
+        st.write(f"**Selected style:** {cur_style}")
 
         # If no summary yet, allow generation here (also auto-switches after generation)
         if not st.session_state.last_summary:
@@ -327,7 +309,7 @@ elif st.session_state.page == "Summary":
                 prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
                 try:
                     with st.spinner("Generating summary with AI..."):
-                        summary = cached_summarize(st.session_state.last_file_hash, cur_style, cur_length, prompt_text)
+                        summary = cached_summarize(st.session_state.last_file_hash, cur_style, prompt_text)
                     st.session_state.last_summary = summary
                     st.session_state.summary_word_count = len(summary.split())
                     st.success("Summary generated successfully!")
