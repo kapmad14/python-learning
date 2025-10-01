@@ -1,14 +1,19 @@
 # utils/auth.py
 """
-Simple in-memory user + usage management for the Contract Simplifier MVP.
+Streamlit-safe auth + in-memory usage helpers.
 
-- No filesystem dependencies (suitable for Streamlit Cloud and local testing).
-- Provides: register_user, validate_user, get_user_plan, ensure_default_user,
-  increment_usage, get_usage.
+This version is robust across Streamlit releases:
+- If st.experimental_singleton is available, we use it to create shared singletons.
+- Otherwise we fall back to module-global dicts (process-level in-memory storage).
 
-Security:
-- Passwords are stored as salted SHA256 hashes (username used as salt) for basic safety.
-- For production, replace with bcrypt/argon2 and a persistent database.
+Public API:
+- register_user(username, password, plan="free")
+- validate_user(username, password) -> bool
+- get_user_plan(username) -> str
+- ensure_default_user()
+- increment_usage(username, uploads=0, summaries=0)
+- get_usage(username) -> {"uploads": int, "summaries": int}
+- list_users() -> dict (admin/debug)
 """
 
 from typing import Dict
@@ -18,38 +23,46 @@ import streamlit as st
 
 logger = logging.getLogger(__name__)
 
-# ---------- In-memory user store (singleton) ----------
-@st.experimental_singleton
-def _get_user_store() -> Dict[str, Dict]:
-    """
-    Returns a dict mapping username -> {"pw_hash": str, "plan": "free"|"paid", ...}
-    Stored in-memory for the running app instance only.
-    """
-    return {}
+# Attempt to use st.experimental_singleton if present, else fallback
+try:
+    _singleton_decorator = st.experimental_singleton  # type: ignore
+except Exception:
+    _singleton_decorator = None
 
-# ---------- In-memory usage store (singleton) ----------
-@st.experimental_singleton
-def _get_usage_store() -> Dict[str, Dict[str, int]]:
-    """
-    Returns a dict mapping username -> {"uploads": int, "summaries": int}
-    """
-    return {}
+if _singleton_decorator:
+    @ _singleton_decorator
+    def _get_user_store() -> Dict[str, Dict]:
+        """Streamlit-backed singleton user store."""
+        return {}
+else:
+    # fallback module-level dict
+    _GLOBAL_USER_STORE: Dict[str, Dict] = {}
 
-# ---------- Password hashing helper ----------
+    def _get_user_store() -> Dict[str, Dict]:
+        return _GLOBAL_USER_STORE
+
+# Usage store (uploads/summaries)
+if _singleton_decorator:
+    @ _singleton_decorator
+    def _get_usage_store() -> Dict[str, Dict[str, int]]:
+        return {}
+else:
+    _GLOBAL_USAGE_STORE: Dict[str, Dict[str, int]] = {}
+
+    def _get_usage_store() -> Dict[str, Dict[str, int]]:
+        return _GLOBAL_USAGE_STORE
+
+# Password hashing helper (simple salted SHA256 for testing only)
 def _hash_password(username: str, password: str) -> str:
-    """
-    Lightweight salted hash: SHA256(username + password).
-    Replace with bcrypt/argon2 for production.
-    """
     if username is None or password is None:
         return ""
     s = (username + password).encode("utf-8")
     return hashlib.sha256(s).hexdigest()
 
-# ---------- User management API ----------
+# ---------- User management ----------
 def register_user(username: str, password: str, plan: str = "free") -> None:
     """
-    Register a new user. Raises ValueError if username invalid or already exists.
+    Register a new user. Raises ValueError if invalid or already exists.
     """
     if not username or not password:
         raise ValueError("username and password are required")
@@ -60,13 +73,11 @@ def register_user(username: str, password: str, plan: str = "free") -> None:
 
     plan = plan if plan in ("free", "paid") else "free"
     users[username] = {"pw_hash": _hash_password(username, password), "plan": plan}
-    # update singleton store
-    # Note: directly mutating the returned dict updates the singleton
     logger.info("Registered new user: %s (plan=%s)", username, plan)
 
 def validate_user(username: str, password: str) -> bool:
     """
-    Validate username/password. Returns True if valid, else False.
+    Validate username/password. Returns True if valid else False.
     """
     if not username or not password:
         return False
@@ -88,9 +99,8 @@ def get_user_plan(username: str) -> str:
 
 def ensure_default_user():
     """
-    Ensure a default test user exists for quick testing.
+    Ensure a default test user exists.
     Username: 'test'  Password: 'test'
-    (You can change this as needed.)
     """
     users = _get_user_store()
     if "test" not in users:
@@ -105,14 +115,17 @@ def increment_usage(username: str, uploads: int = 0, summaries: int = 0) -> None
     """
     if not username:
         return
-    store = _get_usage_store()
-    entry = store.get(username)
-    if not entry:
-        entry = {"uploads": 0, "summaries": 0}
-    entry["uploads"] = entry.get("uploads", 0) + int(uploads)
-    entry["summaries"] = entry.get("summaries", 0) + int(summaries)
-    store[username] = entry
-    logger.debug("increment_usage: %s -> %s", username, entry)
+    try:
+        store = _get_usage_store()
+        entry = store.get(username)
+        if not entry:
+            entry = {"uploads": 0, "summaries": 0}
+        entry["uploads"] = entry.get("uploads", 0) + int(uploads)
+        entry["summaries"] = entry.get("summaries", 0) + int(summaries)
+        store[username] = entry
+        logger.debug("increment_usage: %s -> %s", username, entry)
+    except Exception as e:
+        logger.exception("increment_usage failed: %s", e)
 
 def get_usage(username: str) -> Dict[str, int]:
     """
@@ -120,10 +133,13 @@ def get_usage(username: str) -> Dict[str, int]:
     """
     if not username:
         return {"uploads": 0, "summaries": 0}
-    store = _get_usage_store()
-    return store.get(username, {"uploads": 0, "summaries": 0})
+    try:
+        store = _get_usage_store()
+        return store.get(username, {"uploads": 0, "summaries": 0})
+    except Exception as e:
+        logger.exception("get_usage failed: %s", e)
+        return {"uploads": 0, "summaries": 0}
 
-# ---------- (Optional helper) For admin/debug only ----------
 def list_users() -> Dict[str, Dict]:
     """
     Return a shallow copy of the user store for debugging.
