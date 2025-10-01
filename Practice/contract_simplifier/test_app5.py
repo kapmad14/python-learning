@@ -16,7 +16,7 @@ from parser import (
     extract_text_from_image,
 )
 from ai_processor import summarize_contract
-from auth import register_user, validate_user, get_user_plan, ensure_default_user, increment_usage, get_usage
+from auth import register_user, validate_user, get_user_plan, ensure_default_user
 
 # Setup logging (Streamlit captures stdout/stderr)
 logger = logging.getLogger("contract_simplifier")
@@ -142,14 +142,6 @@ st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
 user_plan = get_user_plan(st.session_state.user) or "free"
 st.sidebar.write(f"Plan: **{user_plan}**")
 
-# show usage (in-memory)
-try:
-    usage = get_usage(st.session_state.user)
-    st.sidebar.write(f"Uploads: **{usage.get('uploads', 0)}**, Summaries: **{usage.get('summaries', 0)}**")
-except Exception:
-    logger.exception("get_usage failed")
-    st.sidebar.write("Uploads: **0**, Summaries: **0**")
-
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
@@ -251,12 +243,6 @@ if st.session_state.page == "Upload":
                 st.session_state.orig_word_count = orig_words
                 st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
 
-                # increment upload usage in-memory
-                try:
-                    increment_usage(st.session_state.user, uploads=1)
-                except Exception:
-                    logger.exception("increment_usage failed for upload")
-
                 with st.expander("View extracted text (click to expand)"):
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
@@ -288,13 +274,6 @@ if st.session_state.page == "Upload":
                             summary = cached_summarize(st.session_state.last_file_hash, format_style, length, prompt_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
-
-                        # increment summary usage in-memory
-                        try:
-                            increment_usage(st.session_state.user, summaries=1)
-                        except Exception:
-                            logger.exception("increment_usage failed for summary")
-
                         st.success("Summary generated successfully!")
                         # switch to Summary page and rerun to show it immediately
                         st.session_state.page = "Summary"
@@ -351,13 +330,6 @@ elif st.session_state.page == "Summary":
                         summary = cached_summarize(st.session_state.last_file_hash, cur_style, cur_length, prompt_text)
                     st.session_state.last_summary = summary
                     st.session_state.summary_word_count = len(summary.split())
-
-                    # increment summary usage in-memory
-                    try:
-                        increment_usage(st.session_state.user, summaries=1)
-                    except Exception:
-                        logger.exception("increment_usage failed for summary (generate)")
-
                     st.success("Summary generated successfully!")
                     # remain on Summary page and rerun
                     st.session_state.page = "Summary"
