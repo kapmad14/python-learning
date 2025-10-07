@@ -191,7 +191,7 @@ if "last_style" not in st.session_state:
     st.session_state.last_style = None
 # summary length stored in session (short/medium/detailed)
 if "last_length" not in st.session_state:
-    st.session_state.last_length = "medium"
+    st.session_state.last_length = "Medium"
 
 if "orig_word_count" not in st.session_state:
     st.session_state.orig_word_count = 0
@@ -390,8 +390,8 @@ if uploaded_file:
 
                 length = st.radio(
                     "Summary length",
-                    ("short", "medium", "detailed"),
-                    index=("short", "medium", "detailed").index(st.session_state.last_length),
+                    ("Short", "Medium", "Detailed"),
+                    index=("Short", "Medium", "Detailed").index(st.session_state.last_length),
                     help="Choose summary length"
                 )
 
