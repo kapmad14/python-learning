@@ -47,44 +47,115 @@ def cached_summarize(file_hash: str, format_style: str, length: str, prompt_text
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     """
-    Create a PDF from `text` using fpdf. Robust handling for unicode:
-    - If pdf.output returns bytes, return it directly.
-    - If it returns str, encode to latin-1 but replace non-encodable chars instead of failing.
-    Raises ImportError if fpdf missing (kept behavior).
+    Create PDF bytes using reportlab + embedded TTF (DejaVuSans.ttf) for Unicode support.
+    Falls back to a safe fpdf approach if reportlab is not available.
     """
+    # Try reportlab first
     try:
-        from fpdf import FPDF
-    except ImportError as ie:
-        raise ie
-
-    pdf = FPDF()
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_page()
-    # Use a simple core font (Arial) to keep dependencies minimal.
-    # Note: core fonts may not support all Unicode; non-encodable characters are replaced below.
-    pdf.set_font("Arial", size=12)
-    # Add a title line
-    try:
-        pdf.cell(0, 10, title, ln=1)
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from reportlab.lib.pagesizes import A4
+        from reportlab.pdfgen import canvas
     except Exception:
-        # some fpdf versions may raise on unusual title characters; ignore and continue
+        # Fallback to fpdf (best-effort; uses replacement encoding)
+        try:
+            from fpdf import FPDF
+        except Exception as ie:
+            raise ie
+
+        pdf = FPDF()
+        pdf.set_auto_page_break(auto=True, margin=15)
+        pdf.add_page()
+        pdf.set_font("Arial", size=12)
+        try:
+            pdf.cell(0, 10, title, ln=1)
+        except Exception:
+            pass
+        try:
+            pdf.multi_cell(0, 8, text)
+        except Exception:
+            safe_text = (text or "").encode("latin-1", errors="replace").decode("latin-1")
+            for line in safe_text.splitlines():
+                pdf.multi_cell(0, 8, line)
+        out = pdf.output(dest='S')
+        return bytes(out) if isinstance(out, (bytes, bytearray)) else out.encode('latin-1', errors='replace')
+
+    # ---------- ReportLab path ----------
+    # Look for DejaVuSans.ttf next to app.py or project root
+    possible_paths = [
+        os.path.join(os.getcwd(), "DejaVuSans.ttf"),
+        os.path.join(os.path.dirname(__file__), "DejaVuSans.ttf"),
+        os.path.join(os.path.dirname(__file__), "..", "DejaVuSans.ttf"),
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+    font_path = next((p for p in possible_paths if os.path.exists(p)), None)
+
+    # Register a TTF if found
+    font_name = "Helvetica"  # default fallback font
+    if font_path:
+        try:
+            pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
+            font_name = "DejaVuSans"
+        except Exception as e:
+            # fallback to Helvetica if registration fails
+            font_name = "Helvetica"
+
+    # Render the PDF into memory
+    buf = io.BytesIO()
+    page_w, page_h = A4
+    c = canvas.Canvas(buf, pagesize=A4)
+    try:
+        c.setFont(font_name, 12)
+    except Exception:
+        # fallback if font issues
+        c.setFont("Helvetica", 12)
+
+    # Title
+    try:
+        c.drawString(30, page_h - 40, title)
+    except Exception:
         pass
-    # Write text as multiple lines — keep it simple
-    try:
-        pdf.multi_cell(0, 8, text)
-    except Exception:
-        # If multi_cell fails for weird unicode, write line-by-line with replacement
-        safe_text = (text or "").encode("latin-1", errors="replace").decode("latin-1")
-        for line in safe_text.splitlines():
-            pdf.multi_cell(0, 8, line)
 
-    out = pdf.output(dest='S')  # may return bytes or str depending on fpdf version
-    if isinstance(out, (bytes, bytearray)):
-        return bytes(out)
-    else:
-        # out is str: encode to latin-1 but replace characters that can't be encoded
-        return out.encode('latin-1', errors='replace')
+    import textwrap
+    # rough chars per line heuristic; adjust if needed
+    max_chars = int((page_w - 60) / 6)
+    y = page_h - 60
+    line_height = 14
 
+    for paragraph in (text or "").splitlines():
+        if paragraph.strip() == "":
+            y -= line_height
+            if y < 60:
+                c.showPage()
+                try:
+                    c.setFont(font_name, 12)
+                except Exception:
+                    c.setFont("Helvetica", 12)
+                y = page_h - 40
+            continue
+
+        wrapped = textwrap.wrap(paragraph, width=max_chars) or [paragraph]
+        for wline in wrapped:
+            try:
+                c.drawString(30, y, wline)
+            except Exception:
+                # If drawing that line fails for any reason, write a safe replacement
+                safe_line = wline.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+                c.drawString(30, y, safe_line)
+            y -= line_height
+            if y < 60:
+                c.showPage()
+                try:
+                    c.setFont(font_name, 12)
+                except Exception:
+                    c.setFont("Helvetica", 12)
+                y = page_h - 40
+
+    c.save()
+    buf.seek(0)
+    pdf_bytes = buf.read()
+    buf.close()
+    return pdf_bytes
 
 # -----------------------
 # Configuration: limits (change as needed)
