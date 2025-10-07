@@ -266,6 +266,15 @@ if st.session_state.page == "Upload":
                 with st.expander("View extracted text (click to expand)"):
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
+                # Download extracted text as PDF
+                try:
+                    extracted_pdf_bytes = make_pdf_bytes(st.session_state.last_text, title="Extracted Contract Text")
+                    st.download_button("⬇️ Download extracted text (pdf)", extracted_pdf_bytes, file_name="extracted_text.pdf", mime="application/pdf")
+                except ImportError:
+                    st.info("PDF export requires 'fpdf'. Install (`pip install fpdf`) to enable extracted-text PDF download.")
+                except Exception as e:
+                    logger.exception("Could not create extracted-text PDF: %s", e)
+
                 # Summarize now -> generate summary and show it immediately (no page switch)
                 if st.button("Summarize now"):
                     # Build format-style prefix safely (use multi-line strings)
@@ -334,8 +343,17 @@ elif st.session_state.page == "Summary":
     else:
         st.subheader("Document statistics")
         st.write(f"- Original word count: **{st.session_state.orig_word_count:,}**")
+
+        # character counts and estimated reading time
+        orig_chars = len(st.session_state.last_text or "")
+        est_orig_minutes = max(1, round(st.session_state.orig_word_count / 200)) if st.session_state.orig_word_count else 0
+        st.write(f"- Original characters: **{orig_chars:,}** — estimated read time: **{est_orig_minutes} min**")
+
         if st.session_state.last_summary:
             st.write(f"- Summary word count: **{st.session_state.summary_word_count:,}**")
+            summary_chars = len(st.session_state.last_summary)
+            est_summary_minutes = max(1, round(st.session_state.summary_word_count / 200)) if st.session_state.summary_word_count else 0
+            st.write(f"- Summary characters: **{summary_chars:,}** — estimated read time: **{est_summary_minutes} min**")
             if st.session_state.orig_word_count > 0:
                 pct = 100 * st.session_state.summary_word_count / st.session_state.orig_word_count
                 st.write(f"- Compression: **{pct:.1f}%** of original")
