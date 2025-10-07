@@ -35,17 +35,43 @@ st.set_page_config(page_title="Contract Simplifier", layout="wide")
 def compute_bytes_hash(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
-@st.cache_data(show_spinner=False)
-def cached_summarize(file_hash: str, format_style: str, length: str, prompt_text: str):
+def _make_local_cache_key(file_hash: str, format_style: str, length_display: str, prompt_text: str) -> str:
+    # length_display is "Short"/"Medium"/"Detailed" -> convert to lower for key consistency
+    length_key = (length_display or "Medium").lower()
+    prompt_hash = hashlib.sha256((prompt_text or "").encode("utf-8")).hexdigest()
+    return f"{file_hash}|{format_style}|{length_key}|{prompt_hash}"
+
+def cached_summarize(file_hash: str, format_style: str, length_display: str, prompt_text: str):
     """
-    Cache wrapper around the summarizer. Keyed by file_hash + format_style + length.
-    Returns summary string.
+    Local-session cache wrapper for summarizer. Stores results in st.session_state['local_summary_cache'].
+    Sets st.session_state['last_summary_cached'] to True if the result was returned from cache.
     """
-    return summarize_contract(prompt_text, style=length)
+    if "local_summary_cache" not in st.session_state:
+        st.session_state["local_summary_cache"] = {}
+
+    key = _make_local_cache_key(file_hash, format_style, length_display, prompt_text)
+    cache = st.session_state["local_summary_cache"]
+
+    # If cached locally, return cached result and mark flag
+    if key in cache:
+        st.session_state["last_summary_cached"] = True
+        return cache[key]
+
+    # Not cached: call the summarizer and store
+    st.session_state["last_summary_cached"] = False
+    # convert display length to internal key
+    length_key = (length_display or "Medium").lower()
+    result = summarize_contract(prompt_text, style=length_key)
+    try:
+        cache[key] = result
+        st.session_state["local_summary_cache"] = cache
+    except Exception:
+        # ignore cache store failures
+        logger.exception("Failed to store summary in local cache")
+    return result
 
 def scroll_to_summary():
     """Small helper to scroll the page to the summary anchor."""
-    # Use a tiny JS snippet to scroll the element into view smoothly.
     components.html(
         """
         <script>
@@ -189,7 +215,7 @@ if "last_summary" not in st.session_state:
     st.session_state.last_summary = ""
 if "last_style" not in st.session_state:
     st.session_state.last_style = None
-# summary length stored in session (short/medium/detailed)
+# store display form of length as CamelCase: Short/Medium/Detailed
 if "last_length" not in st.session_state:
     st.session_state.last_length = "Medium"
 
@@ -197,6 +223,10 @@ if "orig_word_count" not in st.session_state:
     st.session_state.orig_word_count = 0
 if "summary_word_count" not in st.session_state:
     st.session_state.summary_word_count = 0
+
+# local summary cache flag
+if "last_summary_cached" not in st.session_state:
+    st.session_state.last_summary_cached = False
 
 # -----------------------
 # Authentication flow (login + register)
@@ -272,7 +302,6 @@ uploaded_file = st.file_uploader(
 
 # Reset last_summary when user selects a new file (avoid stale summaries)
 if uploaded_file is not None:
-    # If new file hash differs from last_file_hash, clear previous summary/text
     try:
         incoming_bytes = uploaded_file.getvalue()
         incoming_hash = compute_bytes_hash(incoming_bytes) if incoming_bytes else None
@@ -281,13 +310,12 @@ if uploaded_file is not None:
             st.session_state.last_text = ""
             st.session_state.summary_word_count = 0
             st.session_state.orig_word_count = 0
+            st.session_state.last_summary_cached = False
     except Exception:
         pass
 
 # Extraction status and subsequent controls only appear after a successful upload & extraction
 if uploaded_file:
-    # Format/style selectors are shown only after extraction (per your request)
-    # but we place placeholders here so the layout is consistent.
     # Get bytes and basic checks
     try:
         file_bytes = uploaded_file.getvalue()
@@ -338,7 +366,7 @@ if uploaded_file:
                 # Store text and show extraction details immediately
                 st.session_state.last_text = text
                 st.session_state.last_style = st.session_state.last_style or "Detailed Summary"
-                st.session_state.last_length = st.session_state.last_length or "medium"
+                st.session_state.last_length = st.session_state.last_length or "Medium"
                 orig_words = len(text.split())
                 st.session_state.orig_word_count = orig_words
 
@@ -374,30 +402,39 @@ if uploaded_file:
                 st.write("---")
 
                 # -----------------------
-                # Now show Style (radio) and Length (radio) choices AFTER extraction
+                # Style and Length controls side-by-side (two columns)
                 # -----------------------
                 style_options = ["Detailed Summary", "Bullet Points", "Executive Overview"]
                 try:
-                    default_index = style_options.index(st.session_state.last_style) if st.session_state.last_style in style_options else 0
+                    default_style_index = style_options.index(st.session_state.last_style) if st.session_state.last_style in style_options else 0
                 except Exception:
-                    default_index = 0
-                format_style = st.radio(
-                    "Summarization style",
-                    style_options,
-                    index=default_index,
-                    help="Choose how the summary should be written."
-                )
+                    default_style_index = 0
 
-                length = st.radio(
-                    "Summary length",
-                    ("Short", "Medium", "Detailed"),
-                    index=("Short", "Medium", "Detailed").index(st.session_state.last_length),
-                    help="Choose summary length"
-                )
+                length_options_display = ["Short", "Medium", "Detailed"]
+                try:
+                    default_length_index = length_options_display.index(st.session_state.last_length) if st.session_state.last_length in length_options_display else 1
+                except Exception:
+                    default_length_index = 1
 
-                # Save selections back to session state for Summary page compatibility
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    format_style = st.radio(
+                        "Summarization style",
+                        style_options,
+                        index=default_style_index,
+                        help="Choose how the summary should be written."
+                    )
+                with col2:
+                    length_display = st.radio(
+                        "Summary length",
+                        length_options_display,
+                        index=default_length_index,
+                        help="Choose summary length"
+                    )
+
+                # Save selections back to session state
                 st.session_state.last_style = format_style
-                st.session_state.last_length = length
+                st.session_state.last_length = length_display
 
                 # Summarize button
                 if st.button("Summarize now"):
@@ -423,8 +460,8 @@ if uploaded_file:
 
                     try:
                         with st.spinner("Generating summary with AI..."):
-                            # Use cache keyed by file_hash + format_style + length
-                            summary = cached_summarize(st.session_state.last_file_hash, format_style, length, prompt_text)
+                            # Use local-session cache keyed by file_hash + format_style + length + prompt
+                            summary = cached_summarize(st.session_state.last_file_hash, format_style, length_display, prompt_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
 
@@ -436,8 +473,16 @@ if uploaded_file:
 
                         st.success("Summary generated successfully!")
 
-                        # Display summary (immediately on same page)
+                        # Display summary (immediately on same page) with anchor for scrolling
                         st.markdown('<div id="summary-section"></div>', unsafe_allow_html=True)
+
+                        # Show subtle cached badge if used
+                        if st.session_state.get("last_summary_cached", False):
+                            st.markdown(
+                                "<span style='background-color:#e6fff2; color:#006644; padding:6px 8px; border-radius:6px; font-size:13px'>Cached result used</span>",
+                                unsafe_allow_html=True,
+                            )
+
                         st.subheader("AI Summary")
                         st.text_area("Summary (generated)", value=st.session_state.last_summary, height=350)
 
@@ -458,7 +503,6 @@ if uploaded_file:
                         try:
                             scroll_to_summary()
                         except Exception:
-                            # ignore scroll errors silently
                             pass
 
                     except Exception as e:
