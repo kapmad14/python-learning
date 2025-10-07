@@ -65,5 +65,9 @@ openai
 fpdf
 pdfplumber
 requests
+pymupdf
+pdfminer.six
+reportlab>=3.6.0
+
 
 
