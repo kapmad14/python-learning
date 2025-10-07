@@ -35,13 +35,15 @@ st.set_page_config(page_title="Contract Simplifier", layout="wide")
 def compute_bytes_hash(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
-def _make_local_cache_key(file_hash: str, format_style: str, length_display: str, prompt_text: str) -> str:
-    # length_display is "Short"/"Medium"/"Detailed" -> convert to lower for key consistency
-    length_key = (length_display or "Medium").lower()
-    prompt_hash = hashlib.sha256((prompt_text or "").encode("utf-8")).hexdigest()
-    return f"{file_hash}|{format_style}|{length_key}|{prompt_hash}"
+def _make_local_cache_key(file_hash: str, format_style: str, contract_text: str) -> str:
+    """
+    Local cache key uses file_hash + style + contract_text hash to avoid false matches.
+    """
+    prompt_hash = hashlib.sha256((contract_text or "").encode("utf-8")).hexdigest()
+    style_key = (format_style or "Detailed Summary")
+    return f"{file_hash}|{style_key}|{prompt_hash}"
 
-def cached_summarize(file_hash: str, format_style: str, length_display: str, prompt_text: str):
+def cached_summarize(file_hash: str, format_style: str, contract_text: str):
     """
     Local-session cache wrapper for summarizer. Stores results in st.session_state['local_summary_cache'].
     Sets st.session_state['last_summary_cached'] to True if the result was returned from cache.
@@ -49,7 +51,7 @@ def cached_summarize(file_hash: str, format_style: str, length_display: str, pro
     if "local_summary_cache" not in st.session_state:
         st.session_state["local_summary_cache"] = {}
 
-    key = _make_local_cache_key(file_hash, format_style, length_display, prompt_text)
+    key = _make_local_cache_key(file_hash, format_style, contract_text)
     cache = st.session_state["local_summary_cache"]
 
     # If cached locally, return cached result and mark flag
@@ -59,14 +61,20 @@ def cached_summarize(file_hash: str, format_style: str, length_display: str, pro
 
     # Not cached: call the summarizer and store
     st.session_state["last_summary_cached"] = False
-    # convert display length to internal key
-    length_key = (length_display or "Medium").lower()
-    result = summarize_contract(prompt_text, style=length_key)
+
+    # map display style to internal style strings that ai_processor expects
+    style_map = {
+        "Detailed Summary": "detailed",
+        "Bullet Points": "bullet",
+        "Executive Overview": "executive",
+    }
+    style_internal = style_map.get(format_style, "detailed")
+
+    result = summarize_contract(contract_text, style=style_internal)
     try:
         cache[key] = result
         st.session_state["local_summary_cache"] = cache
     except Exception:
-        # ignore cache store failures
         logger.exception("Failed to store summary in local cache")
     return result
 
@@ -133,8 +141,7 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
         try:
             pdfmetrics.registerFont(TTFont("DejaVuSans", font_path))
             font_name = "DejaVuSans"
-        except Exception as e:
-            # fallback to Helvetica if registration fails
+        except Exception:
             font_name = "Helvetica"
 
     # Render the PDF into memory
@@ -144,7 +151,6 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     try:
         c.setFont(font_name, 12)
     except Exception:
-        # fallback if font issues
         c.setFont("Helvetica", 12)
 
     # Title
@@ -176,7 +182,6 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
             try:
                 c.drawString(30, y, wline)
             except Exception:
-                # If drawing that line fails for any reason, write a safe replacement
                 safe_line = wline.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
                 c.drawString(30, y, safe_line)
             y -= line_height
@@ -215,9 +220,6 @@ if "last_summary" not in st.session_state:
     st.session_state.last_summary = ""
 if "last_style" not in st.session_state:
     st.session_state.last_style = None
-# store display form of length as CamelCase: Short/Medium/Detailed
-if "last_length" not in st.session_state:
-    st.session_state.last_length = "Medium"
 
 if "orig_word_count" not in st.session_state:
     st.session_state.orig_word_count = 0
@@ -366,7 +368,6 @@ if uploaded_file:
                 # Store text and show extraction details immediately
                 st.session_state.last_text = text
                 st.session_state.last_style = st.session_state.last_style or "Detailed Summary"
-                st.session_state.last_length = st.session_state.last_length or "Medium"
                 orig_words = len(text.split())
                 st.session_state.orig_word_count = orig_words
 
@@ -402,7 +403,7 @@ if uploaded_file:
                 st.write("---")
 
                 # -----------------------
-                # Style and Length controls side-by-side (two columns)
+                # Style control (single radio only) - placed in full width
                 # -----------------------
                 style_options = ["Detailed Summary", "Bullet Points", "Executive Overview"]
                 try:
@@ -410,58 +411,25 @@ if uploaded_file:
                 except Exception:
                     default_style_index = 0
 
-                length_options_display = ["Short", "Medium", "Detailed"]
-                try:
-                    default_length_index = length_options_display.index(st.session_state.last_length) if st.session_state.last_length in length_options_display else 1
-                except Exception:
-                    default_length_index = 1
+                format_style = st.radio(
+                    "Summarization style",
+                    style_options,
+                    index=default_style_index,
+                    help="Choose how the summary should be written."
+                )
 
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    format_style = st.radio(
-                        "Summarization style",
-                        style_options,
-                        index=default_style_index,
-                        help="Choose how the summary should be written."
-                    )
-                with col2:
-                    length_display = st.radio(
-                        "Summary length",
-                        length_options_display,
-                        index=default_length_index,
-                        help="Choose summary length"
-                    )
-
-                # Save selections back to session state
+                # Save selection back to session state
                 st.session_state.last_style = format_style
-                st.session_state.last_length = length_display
 
                 # Summarize button
                 if st.button("Summarize now"):
-                    # Build format-style prefix safely (use multi-line strings)
-                    if format_style == "Detailed Summary":
-                        style_prefix = (
-                            "Please produce a detailed plain-English summary covering parties, "
-                            "obligations, deadlines, penalties, termination and renewal clauses."
-                        )
-                    elif format_style == "Bullet Points":
-                        style_prefix = (
-                            "Please summarize the contract into concise bullet points focusing on "
-                            "key obligations, deadlines, penalties, termination and renewal."
-                        )
-                    else:  # Executive Overview
-                        style_prefix = (
-                            "Please provide a short executive overview highlighting the most "
-                            "critical terms, risks, and actions needed."
-                        )
-
-                    # Build prompt_text (format prefix + contract)
-                    prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
+                    # Use ai_processor to choose prompt based on selected style
+                    prompt_contract_text = st.session_state.last_text
 
                     try:
                         with st.spinner("Generating summary with AI..."):
-                            # Use local-session cache keyed by file_hash + format_style + length + prompt
-                            summary = cached_summarize(st.session_state.last_file_hash, format_style, length_display, prompt_text)
+                            # Use local-session cache keyed by file_hash + style + contract text
+                            summary = cached_summarize(st.session_state.last_file_hash, format_style, prompt_contract_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
 
@@ -509,19 +477,4 @@ if uploaded_file:
                         st.error("AI summarization failed. Please try again or check your API key/limits.")
                         st.exception(e)
 
-# -----------------------
-# Analysis / Highlights (kept as collapsible under the main flow)
-# -----------------------
-st.write("---")
-st.header("Analysis & Highlights 🔍")
-if st.session_state.last_summary:
-    st.write("Quick highlights (auto-generated):")
-    try:
-        lines = st.session_state.last_summary.strip().splitlines()
-        highlights = lines[:6] if lines else []
-        for i, hl in enumerate(highlights, start=1):
-            st.markdown(f"**{i}.** {hl}")
-    except Exception:
-        st.info("No highlights available.")
-else:
-    st.info("Summary will appear above once generated — highlights will show here.")
+# End of linear flow

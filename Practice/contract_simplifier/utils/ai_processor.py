@@ -1,115 +1,99 @@
 # utils/ai_processor.py
-import os
-import streamlit as st
 import openai
-import logging
+import streamlit as st
+import os
 
-logger = logging.getLogger(__name__)
-
-# --- API key setup: Streamlit secrets preferred, else env var ---
-OPENAI_KEY = None
-if hasattr(st, "secrets") and "OPENAI_API_KEY" in st.secrets:
-    OPENAI_KEY = st.secrets["OPENAI_API_KEY"]
+# Load API key: prefer Streamlit secrets, otherwise environment
+if "OPENAI_API_KEY" in st.secrets:
+    openai.api_key = st.secrets["OPENAI_API_KEY"]
 else:
-    OPENAI_KEY = os.getenv("OPENAI_API_KEY")
+    openai.api_key = os.getenv("OPENAI_API_KEY")
 
-if not OPENAI_KEY:
-    # We don't raise at import time; callers will see authentication errors when they try to use the API.
-    logger.warning("OPENAI_API_KEY not found in Streamlit secrets or environment variables.")
-else:
-    # set legacy openai.api_key (helps older client usage)
-    try:
-        openai.api_key = OPENAI_KEY
-    except Exception:
-        # ignore if openai doesn't expose api_key as attribute in this installed package variant
-        pass
-
-# --- Helper: choose token budget by length ---
-LENGTH_TO_MAX_TOKENS = {
-    "short": 300,
-    "medium": 800,
-    "detailed": 1400,
-}
-
-def _call_openai_chat(messages, model="gpt-3.5-turbo", max_tokens=800, temperature=0.5):
+def _build_prompt(contract_text: str, style: str) -> str:
     """
-    Call OpenAI chat completion, trying the newer OpenAI client first (openai>=1.0.0),
-    then falling back to the older openai.ChatCompletion API if the newer client isn't available.
-    Returns the assistant text (string) or raises a RuntimeError on failure.
+    Build the user prompt based on selected style.
+    style: one of "detailed", "bullet", "executive"
     """
-    # Try modern client (openai>=1.0)
-    try:
-        from openai import OpenAI as OpenAIClient
-        client = OpenAIClient(api_key=OPENAI_KEY) if OPENAI_KEY else OpenAIClient()
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
+    if style == "detailed":
+        template = (
+            "You are a legal assistant that simplifies contracts into clear, structured plain-English.\n\n"
+            "Task:\n"
+            "1. Read the CONTRACT below.\n"
+            "2. Produce a structured, plain-English summary with the following sections:\n"
+            "   - Parties: who the parties are and their roles.\n"
+            "   - Term & Effective Date: any effective dates, durations, renewal clauses.\n"
+            "   - Key Obligations: for each party, list primary duties and deliverables.\n"
+            "   - Payment Terms: amounts, schedules, invoicing, late fees.\n"
+            "   - Deadlines & Milestones: explicit dates or timing obligations.\n"
+            "   - Termination & Penalties: grounds for termination, notice periods, penalties.\n"
+            "   - Risks & Unusual Clauses: highlight anything risky or atypical.\n"
+            "   - Actions / Next Steps: 3 practical recommendations the reader should consider.\n"
+            "3. Use clear headings, short paragraphs, and numbered lists. Keep legal jargon minimal and explain technical terms in parentheses.\n"
+            "4. If a section is not present in the contract, state \"Not found / Not specified\".\n"
+            "5. At the end, include a one-line executive summary (1 sentence).\n\n"
+            "Contract:\n"
+            f"{contract_text}"
         )
-        # modern client: resp.choices[0].message.content
-        try:
-            return resp.choices[0].message.content.strip()
-        except Exception:
-            # Some responses differ: try dict access
-            return resp["choices"][0]["message"]["content"].strip()
-    except Exception as modern_exc:
-        logger.debug("Modern OpenAI client call failed or not available: %s", modern_exc)
+    elif style == "bullet":
+        template = (
+            "You are a legal assistant that summarizes contracts into concise bullet points.\n\n"
+            "Task:\n"
+            "1. Read the CONTRACT below.\n"
+            "2. Produce 10–20 bullet points (each 1–2 lines) that capture:\n"
+            "   - Parties and roles (1 bullet),\n"
+            "   - 3–6 core obligations (one per bullet),\n"
+            "   - Payment terms (1–2 bullets),\n"
+            "   - Deadlines/milestones (1–2 bullets),\n"
+            "   - Termination/penalties (1–2 bullets),\n"
+            "   - Top 3 risks (each a bullet),\n"
+            "   - One-line recommended next step.\n"
+            "3. Use plain, direct language; avoid long paragraphs. Numbered or dash bullets both OK.\n\n"
+            "Contract:\n"
+            f"{contract_text}"
+        )
+    else:  # executive
+        template = (
+            "You are a legal assistant writing an executive overview of contracts.\n\n"
+            "Task:\n"
+            "1. Read the CONTRACT below.\n"
+            "2. Produce a 3–5 sentence executive summary covering:\n"
+            "   - The contract's purpose,\n"
+            "   - The parties and the primary obligations,\n            - The top 2 risks/points of attention,\n"
+            "   - One recommended action for the executive.\n"
+            "3. Keep it non-technical, suitable to paste into an email or README.\n\n"
+            "Contract:\n"
+            f"{contract_text}"
+        )
 
-    # Fallback to legacy openai API if available (older openai versions)
-    try:
-        # prefer ChatCompletion if present
-        if hasattr(openai, "ChatCompletion"):
-            resp = openai.ChatCompletion.create(
-                model=model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            return resp.choices[0].message.content.strip()
-        # older versions may use openai.Completion with prompt; we don't support that here
-    except Exception as legacy_exc:
-        logger.debug("Legacy openai.ChatCompletion call failed: %s", legacy_exc)
+    return template
 
-    # If both attempts failed, raise
-    raise RuntimeError("No compatible OpenAI client available or API call failed. See logs for details.")
-
-def summarize_contract(text: str, style: str = "medium", model: str = "gpt-3.5-turbo"):
+def summarize_contract(contract_text: str, style: str = "medium"):
     """
     Summarize a contract into plain English.
-    style: "short", "medium", "detailed"  (controls length)
-    model: model name to use (default gpt-3.5-turbo for test phase)
+    style: "detailed", "bullet", "executive"
     """
-    style = (style or "medium").lower()
-    if style not in ("short", "medium", "detailed"):
-        style = "medium"
+    style = (style or "detailed").lower()
+    if style not in {"detailed", "bullet", "executive"}:
+        style = "detailed"
 
-    # Length-specific instruction (short/medium/detailed)
-    if style == "short":
-        length_instruction = "Please produce a very concise summary (about 1–2 short paragraphs)."
-    elif style == "detailed":
-        length_instruction = "Please produce a comprehensive detailed summary covering parties, obligations, deadlines, penalties, payment terms, and any notable risks or unusual clauses."
-    else:  # medium
-        length_instruction = "Please produce a balanced summary (concise paragraphs highlighting key clauses, obligations and important risks)."
-
-    # Compose messages: system role + user role that includes length instruction and full text
-    system_msg = {
-        "role": "system",
-        "content": "You are a helpful legal assistant that summarizes contracts into plain English."
-    }
-    user_msg = {
-        "role": "user",
-        "content": f"{length_instruction}\n\nContract text:\n{text}"
-    }
-
-    messages = [system_msg, user_msg]
-
-    max_tokens = LENGTH_TO_MAX_TOKENS.get(style, 800)
+    prompt = _build_prompt(contract_text, style)
 
     try:
-        result_text = _call_openai_chat(messages, model=model, max_tokens=max_tokens, temperature=0.3)
-        return result_text
+        # Using older client method that your environment has been using.
+        # If you run into API library errors, replace with your environment's required call.
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system", "content": "You are a legal assistant specializing in contract simplification."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=1200,
+            temperature=0.2,
+        )
+
+        # response.choices[0].message.content is typical for chat completion responses
+        return response.choices[0].message.content.strip()
+
     except Exception as e:
-        logger.exception("summarize_contract: OpenAI call failed: %s", e)
-        # Raise so app.py's try/except can surface a user-friendly message
-        raise RuntimeError(f"AI summarization error: {e}")
+        # Keep behavior: return a string indicating failure so UI shows a message
+        return f"AI summarization failed: {str(e)}"
