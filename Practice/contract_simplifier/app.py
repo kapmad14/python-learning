@@ -47,8 +47,10 @@ def cached_summarize(file_hash: str, format_style: str, length: str, prompt_text
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     """
-    Try to create a PDF from text using fpdf. If fpdf not installed, raise ImportError.
-    Returns bytes of the PDF.
+    Create a PDF from `text` using fpdf. Robust handling for unicode:
+    - If pdf.output returns bytes, return it directly.
+    - If it returns str, encode to latin-1 but replace non-encodable chars instead of failing.
+    Raises ImportError if fpdf missing (kept behavior).
     """
     try:
         from fpdf import FPDF
@@ -58,10 +60,31 @@ def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     pdf = FPDF()
     pdf.set_auto_page_break(auto=True, margin=15)
     pdf.add_page()
+    # Use a simple core font (Arial) to keep dependencies minimal.
+    # Note: core fonts may not support all Unicode; non-encodable characters are replaced below.
     pdf.set_font("Arial", size=12)
-    pdf.cell(0, 10, title, ln=1)
-    pdf.multi_cell(0, 8, text)
-    return pdf.output(dest='S').encode('latin-1')  # return bytes
+    # Add a title line
+    try:
+        pdf.cell(0, 10, title, ln=1)
+    except Exception:
+        # some fpdf versions may raise on unusual title characters; ignore and continue
+        pass
+    # Write text as multiple lines — keep it simple
+    try:
+        pdf.multi_cell(0, 8, text)
+    except Exception:
+        # If multi_cell fails for weird unicode, write line-by-line with replacement
+        safe_text = (text or "").encode("latin-1", errors="replace").decode("latin-1")
+        for line in safe_text.splitlines():
+            pdf.multi_cell(0, 8, line)
+
+    out = pdf.output(dest='S')  # may return bytes or str depending on fpdf version
+    if isinstance(out, (bytes, bytearray)):
+        return bytes(out)
+    else:
+        # out is str: encode to latin-1 but replace characters that can't be encoded
+        return out.encode('latin-1', errors='replace')
+
 
 # -----------------------
 # Configuration: limits (change as needed)
@@ -267,17 +290,15 @@ if st.session_state.page == "Upload":
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
                 # Download extracted text as PDF
-                # Download extracted text as PDF
                 try:
                     extracted_pdf_bytes = make_pdf_bytes(st.session_state.last_text, title="Extracted Contract Text")
                     st.download_button("⬇️ Download extracted text (pdf)", extracted_pdf_bytes, file_name="extracted_text.pdf", mime="application/pdf")
                 except ImportError:
                     st.info("PDF export requires 'fpdf'. Install (`pip install fpdf`) to enable extracted-text PDF download.")
                 except Exception as e:
-                    # Show a brief user-visible error so it's clear why the button isn't displayed
+                    # Log and show a friendly error; offer TXT fallback
                     logger.exception("Could not create extracted-text PDF: %s", e)
                     st.error("Could not create extracted-text PDF (encoding or PDF generation error). You can still download the extracted text as TXT below.")
-                    # offer TXT download as fallback
                     st.download_button("⬇️ Download extracted text (txt)", st.session_state.last_text or "", file_name="extracted_text.txt", mime="text/plain")
 
 
