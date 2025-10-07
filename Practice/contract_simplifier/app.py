@@ -267,13 +267,19 @@ if st.session_state.page == "Upload":
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
                 # Download extracted text as PDF
+                # Download extracted text as PDF
                 try:
                     extracted_pdf_bytes = make_pdf_bytes(st.session_state.last_text, title="Extracted Contract Text")
                     st.download_button("⬇️ Download extracted text (pdf)", extracted_pdf_bytes, file_name="extracted_text.pdf", mime="application/pdf")
                 except ImportError:
                     st.info("PDF export requires 'fpdf'. Install (`pip install fpdf`) to enable extracted-text PDF download.")
                 except Exception as e:
+                    # Show a brief user-visible error so it's clear why the button isn't displayed
                     logger.exception("Could not create extracted-text PDF: %s", e)
+                    st.error("Could not create extracted-text PDF (encoding or PDF generation error). You can still download the extracted text as TXT below.")
+                    # offer TXT download as fallback
+                    st.download_button("⬇️ Download extracted text (txt)", st.session_state.last_text or "", file_name="extracted_text.txt", mime="text/plain")
+
 
                 # Summarize now -> generate summary and show it immediately (no page switch)
                 if st.button("Summarize now"):
