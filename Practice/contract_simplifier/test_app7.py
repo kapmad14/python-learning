@@ -16,7 +16,7 @@ from parser import (
     extract_text_from_image,
 )
 from ai_processor import summarize_contract
-from auth import register_user, validate_user, get_user_plan, ensure_default_user
+from auth import register_user, validate_user, get_user_plan, ensure_default_user, increment_usage, get_usage
 
 # Setup logging (Streamlit captures stdout/stderr)
 logger = logging.getLogger("contract_simplifier")
@@ -35,13 +35,15 @@ def compute_bytes_hash(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 @st.cache_data(show_spinner=False)
-def cached_summarize(file_hash: str, style: str, prompt_text: str):
+def cached_summarize(file_hash: str, format_style: str, length: str, prompt_text: str):
     """
-    Cache wrapper around the summarizer. Keyed by file_hash + style.
+    Cache wrapper around the summarizer. Keyed by file_hash + format_style + length.
     Returns summary string.
     """
-    # call your existing ai_processor.summarize_contract (which should call OpenAI)
-    return summarize_contract(prompt_text)
+    # We pass the full prompt_text (which includes the format-style prefix and the contract text)
+    # to summarize_contract, and let the summarizer also receive the length instruction via the
+    # 'length' parameter (ai_processor.summarize_contract handles the length parameter).
+    return summarize_contract(prompt_text, style=length)
 
 def make_pdf_bytes(text: str, title: str = "Summary") -> bytes:
     """
@@ -86,6 +88,10 @@ if "last_summary" not in st.session_state:
     st.session_state.last_summary = ""
 if "last_style" not in st.session_state:
     st.session_state.last_style = None
+# summary length stored in session (short/medium/detailed)
+if "last_length" not in st.session_state:
+    st.session_state.last_length = "medium"
+
 if "orig_word_count" not in st.session_state:
     st.session_state.orig_word_count = 0
 if "summary_word_count" not in st.session_state:
@@ -136,6 +142,14 @@ st.sidebar.write(f"Signed in as: **{st.session_state.user}**")
 user_plan = get_user_plan(st.session_state.user) or "free"
 st.sidebar.write(f"Plan: **{user_plan}**")
 
+# show usage (in-memory)
+try:
+    usage = get_usage(st.session_state.user)
+    st.sidebar.write(f"Uploads: **{usage.get('uploads', 0)}**, Summaries: **{usage.get('summaries', 0)}**")
+except Exception:
+    logger.exception("get_usage failed")
+    st.sidebar.write("Uploads: **0**, Summaries: **0**")
+
 if st.sidebar.button("Logout"):
     st.session_state.logged_in = False
     st.session_state.user = None
@@ -162,11 +176,25 @@ if st.session_state.page == "Upload":
         "Choose file", type=["pdf", "docx", "png", "jpg", "jpeg"], accept_multiple_files=False
     )
 
-    # Style selector
-    style = st.selectbox(
+    # Format style selector changed to radio buttons (user requested)
+    style_options = ["Detailed Summary", "Bullet Points", "Executive Overview"]
+    try:
+        default_index = style_options.index(st.session_state.last_style) if st.session_state.last_style in style_options else 0
+    except Exception:
+        default_index = 0
+    format_style = st.radio(
         "Summarization style",
-        ("Detailed Summary", "Bullet Points", "Executive Overview"),
+        style_options,
+        index=default_index,
         help="Choose how the summary should be written."
+    )
+
+    # Summary length selector (short / medium / detailed)
+    length = st.selectbox(
+        "Summary length",
+        ("short", "medium", "detailed"),
+        index=("short", "medium", "detailed").index(st.session_state.last_length),
+        help="Choose summary length: short / medium / detailed."
     )
     st.write("")  # spacing
 
@@ -223,23 +251,30 @@ if st.session_state.page == "Upload":
                 st.session_state.summary_word_count = 0
             else:
                 st.session_state.last_text = text
+                st.session_state.last_style = format_style
+                st.session_state.last_length = length
                 orig_words = len(text.split())
                 st.session_state.orig_word_count = orig_words
                 st.success(f"Text extracted successfully — approx. {orig_words:,} words.")
-                st.session_state.last_style = style
+
+                # increment upload usage in-memory
+                try:
+                    increment_usage(st.session_state.user, uploads=1)
+                except Exception:
+                    logger.exception("increment_usage failed for upload")
 
                 with st.expander("View extracted text (click to expand)"):
                     st.text_area("Contract Text (extracted)", value=text, height=300)
 
-                # Summarize now -> create summary and then switch to Summary page
+                # Summarize now -> generate summary and show it immediately (no page switch)
                 if st.button("Summarize now"):
-                    # Build style prefix safely (use multi-line strings)
-                    if style == "Detailed Summary":
+                    # Build format-style prefix safely (use multi-line strings)
+                    if format_style == "Detailed Summary":
                         style_prefix = (
                             "Please produce a detailed plain-English summary covering parties, "
                             "obligations, deadlines, penalties, termination and renewal clauses."
                         )
-                    elif style == "Bullet Points":
+                    elif format_style == "Bullet Points":
                         style_prefix = (
                             "Please summarize the contract into concise bullet points focusing on "
                             "key obligations, deadlines, penalties, termination and renewal."
@@ -250,17 +285,41 @@ if st.session_state.page == "Upload":
                             "critical terms, risks, and actions needed."
                         )
 
+                    # Build prompt_text (format prefix + contract)
                     prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
 
                     try:
                         with st.spinner("Generating summary with AI..."):
-                            summary = cached_summarize(st.session_state.last_file_hash, style, prompt_text)
+                            # Use cache keyed by file_hash + format_style + length
+                            summary = cached_summarize(st.session_state.last_file_hash, format_style, length, prompt_text)
                         st.session_state.last_summary = summary
                         st.session_state.summary_word_count = len(summary.split())
+
+                        # increment summary usage in-memory
+                        try:
+                            increment_usage(st.session_state.user, summaries=1)
+                        except Exception:
+                            logger.exception("increment_usage failed for summary")
+
                         st.success("Summary generated successfully!")
-                        # switch to Summary page and rerun to show it immediately
-                        st.session_state.page = "Summary"
-                        st.rerun()
+
+                        # Immediately show the generated summary on the Upload page
+                        st.subheader("AI Summary")
+                        st.text_area("Summary (generated)", value=st.session_state.last_summary, height=350)
+
+                        # TXT download
+                        st.download_button("⬇️ Download summary (txt)", st.session_state.last_summary, file_name="summary.txt", mime="text/plain")
+
+                        # PDF download (optional, requires fpdf)
+                        try:
+                            pdf_bytes = make_pdf_bytes(st.session_state.last_summary, title="Contract Summary")
+                            st.download_button("⬇️ Download summary (pdf)", pdf_bytes, file_name="summary.pdf", mime="application/pdf")
+                        except ImportError:
+                            st.info("PDF export requires the 'fpdf' package. Install it (`pip install fpdf`) to enable PDF downloads.")
+                        except Exception as e:
+                            st.error("Could not generate PDF. You can still download the TXT summary.")
+                            st.exception(e)
+
                     except Exception as e:
                         st.error("AI summarization failed. Please try again or check your API key/limits.")
                         st.exception(e)
@@ -285,7 +344,8 @@ elif st.session_state.page == "Summary":
 
         st.write("---")
         cur_style = st.session_state.last_style or "Detailed Summary"
-        st.write(f"**Selected style:** {cur_style}")
+        cur_length = st.session_state.last_length or "medium"
+        st.write(f"**Selected style:** {cur_style} • **Length:** {cur_length}")
 
         # If no summary yet, allow generation here (also auto-switches after generation)
         if not st.session_state.last_summary:
@@ -309,9 +369,16 @@ elif st.session_state.page == "Summary":
                 prompt_text = style_prefix + "\n\nContract:\n" + st.session_state.last_text
                 try:
                     with st.spinner("Generating summary with AI..."):
-                        summary = cached_summarize(st.session_state.last_file_hash, cur_style, prompt_text)
+                        summary = cached_summarize(st.session_state.last_file_hash, cur_style, cur_length, prompt_text)
                     st.session_state.last_summary = summary
                     st.session_state.summary_word_count = len(summary.split())
+
+                    # increment summary usage in-memory
+                    try:
+                        increment_usage(st.session_state.user, summaries=1)
+                    except Exception:
+                        logger.exception("increment_usage failed for summary (generate)")
+
                     st.success("Summary generated successfully!")
                     # remain on Summary page and rerun
                     st.session_state.page = "Summary"
